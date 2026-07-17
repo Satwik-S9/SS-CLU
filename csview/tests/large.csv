@@ -1,0 +1,16 @@
+ID,First Name,Last Name,Email,Department,Job Title,Salary,Start Date,Country,Status
+1,Alice,Johnson,alice@example.com,Engineering,Senior Engineer,95000,2019-03-15,USA,Active
+2,Bob,Smith,bob@example.com,Design,UX Designer,78000,2020-07-01,UK,Active
+3,Carol,Williams,carol@example.com,Engineering,Tech Lead,110000,2017-11-20,USA,Active
+4,Dave,Brown,dave@example.com,Marketing,Marketing Manager,85000,2021-01-10,Canada,Active
+5,Eve,Jones,eve@example.com,Engineering,Backend Engineer,90000,2018-06-05,Australia,Active
+6,Frank,Garcia,frank@example.com,HR,HR Specialist,65000,2022-03-01,USA,Active
+7,Grace,Miller,grace@example.com,Finance,Financial Analyst,80000,2020-09-14,UK,Active
+8,Hank,Davis,hank@example.com,Engineering,DevOps Engineer,92000,2019-08-22,Germany,Active
+9,Iris,Martinez,iris@example.com,Design,Graphic Designer,70000,2021-05-17,Spain,Inactive
+10,Jack,Wilson,jack@example.com,Engineering,Junior Engineer,68000,2023-01-30,USA,Active
+11,Karen,Taylor,karen@example.com,Marketing,Content Writer,58000,2022-11-01,USA,Active
+12,Leo,Anderson,leo@example.com,Engineering,Architect,120000,2016-04-11,Canada,Active
+13,Mia,Thomas,mia@example.com,Finance,CFO,150000,2015-09-03,USA,Active
+14,Ned,Jackson,ned@example.com,Engineering,QA Engineer,72000,2020-02-28,India,Active
+15,Olivia,White,olivia@example.com,Design,Product Designer,82000,2019-12-09,USA,Active

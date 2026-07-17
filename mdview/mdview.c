@@ -5,14 +5,9 @@
  * Usage:  mdview [FILE]
  *         cat file.csv | mdview
  *
- * Options: 
+ * Options:
  *     -v, --version		 Show version information
  * No external dependencies — only the C standard library.
- * 
- * CHANGELOG:
- * 1.0.0: Initial Release.
- * 1.0.1: Added version flag and info
- * 1.0.2: Added author info and copyright notice
  */
 
 #define _GNU_SOURCE
@@ -202,3 +197,10 @@ int main(int argc, char **argv) {
     if (f != stdin) fclose(f);
     return 0;
 }
+
+/*
+Revision History:
+    1.0.0: Initial Build.
+    1.0.1: Added version flag and info
+    1.0.2 (13-07-2026): Initial Release ! Added author info and copyright notice
+*/

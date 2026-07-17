@@ -14,21 +14,27 @@
  *   -v, --version		 Show version information
  *
  * No external dependencies — only the C standard library.
- * 
- * CHANGELOG:
- * 1.0.0: Initial Release.
- * 1.0.1: Added version flag and info
- * 1.0.2: Added author info and copyright notice
- * 1.1.0: Added support to check terminal width and adjust the number of columns displayed accordingly
  */
 
-#define _POSIX_C_SOURCE 200809L
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  ifndef _CRT_SECURE_NO_WARNINGS
+#    define _CRT_SECURE_NO_WARNINGS
+#  endif
+#  ifndef _CRT_NONSTDC_NO_WARNINGS
+#    define _CRT_NONSTDC_NO_WARNINGS
+#  endif
+#  include <windows.h>
+#  define strtok_r strtok_s
+#else
+#  define _POSIX_C_SOURCE 200809L
+#  include <unistd.h>
+#  include <sys/ioctl.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
 
 #define VERSION "1.1.0"
 #define AUTHOR "Satwik Srivastava"
@@ -229,10 +235,15 @@ oom:
  * COLUMNS environment variable, and finally to 80. */
 static int get_term_width(void)
 {
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
+        return csbi.srWindow.Right - csbi.srWindow.Left + 1;
+#else
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
         return ws.ws_col;
-
+#endif
     const char *cols = getenv("COLUMNS");
     if (cols && *cols) {
         int v = atoi(cols);
@@ -736,3 +747,14 @@ int main(int argc, char *argv[])
     tbl_free(&t);
     return 0;
 }
+
+/*
+Revision History:
+    1.0.0: Initial Build.
+    1.0.1: Added version flag and info
+    1.0.2: Added author info and copyright notice
+
+    1.1.0 (13-07-2026): First Release ! Added support to check terminal width and adjust the number of columns displayed accordingly.
+
+    1.2.0 (17-07-2026): Updated to support windows builds.
+*/

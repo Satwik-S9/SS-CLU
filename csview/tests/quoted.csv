@@ -1,0 +1,7 @@
+Product,Description,Price,Notes
+Widget A,"A small, handy widget",9.99,Best seller
+Widget B,"Contains ""premium"" materials",24.99,Limited stock
+Gadget X,"Multi-line
+description not supported in CSV viewers",49.99,New arrival
+Combo Pack,"Includes Widget A, Widget B, and more",39.99,Bundle deal
+Plain Item,No special characters,5.00,

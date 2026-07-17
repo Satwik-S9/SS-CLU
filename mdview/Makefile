@@ -1,5 +1,21 @@
+# Select the compiler
+CC_CANDIDATES := gcc clang cc
+CC             := $(firstword $(foreach c,$(CC_CANDIDATES),$(if $(shell $(WHICH) $(c) 2>$(NULL_DEV)),$(c),)))
+ifeq ($(CC),)
+    $(error No C compiler found. Install gcc or clang, or set CC explicitly)
+endif
+
+# Compiler and Linker flags, plus compile/link command templates.
+CFLAGS   := -Wall -Wextra -pedantic -O2 -std=c11
+LDFLAGS  :=
+COMPILE   = $(CC) $(CFLAGS) -c -o $@ $<
+LINK      = $(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+OBJEXT   := o
+EXEEXT   :=
+
+# Source and Targets
 TARGET_DIR = build
-TARGET = ${TARGET_DIR}/mdview	
+TARGET = ${TARGET_DIR}/mdview
 SOURCE = mdview.c
 PREFIX ?= $(HOME)/.local/bin
 

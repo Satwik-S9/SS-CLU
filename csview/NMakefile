@@ -1,0 +1,56 @@
+# NMakefile — build csview on Windows using clang-cl (LLVM) targeting x64
+# Usage:
+#   nmake /f NMakefile           — build
+#   nmake /f NMakefile clean     — remove build directory
+#   nmake /f NMakefile install   — copy binary to %USERPROFILE%\.local\bin
+#
+# Requires LLVM (clang-cl.exe) and the Visual Studio Build Tools / Windows SDK.
+# Override compiler paths if needed:
+#   nmake /f NMakefile VCTOOLS=<path> WINSDK=<path> SDKVER=<version>
+
+CC       = clang-cl
+CFLAGS   = /W3 /O2 /std:c11 /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS
+
+# Paths to the MSVC toolchain and Windows SDK — defaults match a standard
+# VS 2022 Build Tools installation.  Override on the command line if yours
+# lives somewhere else.
+VCTOOLS  = C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231
+WINSDK   = C:\Program Files (x86)\Windows Kits\10
+SDKVER   = 10.0.26100.0
+
+VCFLAGS  = -vctoolsdir "$(VCTOOLS)" -winsdkdir "$(WINSDK)" -winsdkversion $(SDKVER)
+
+SRC      = csview.c
+TARGET   = csview
+BUILDDIR = build
+OBJ      = $(BUILDDIR)\csview.obj
+BIN      = $(BUILDDIR)\$(TARGET).exe
+
+!MESSAGE Building $(BIN) with $(CC) [x64]
+
+all: $(BIN)
+
+$(BUILDDIR):
+	if not exist $(BUILDDIR) mkdir $(BUILDDIR)
+
+$(OBJ): $(SRC) $(BUILDDIR)
+	$(CC) $(CFLAGS) $(VCFLAGS) /c /Fo"$(OBJ)" $(SRC)
+
+$(BIN): $(OBJ)
+	$(CC) $(CFLAGS) $(VCFLAGS) /Fe"$(BIN)" $(OBJ)
+	@echo   -> Built: $(BIN)
+
+clean:
+	if exist $(BUILDDIR) rmdir /s /q $(BUILDDIR)
+	@echo   -> Cleaned.
+
+PREFIX = $(USERPROFILE)\.local\bin
+
+install: $(BIN)
+	if not exist "$(PREFIX)" mkdir "$(PREFIX)"
+	copy /y $(BIN) "$(PREFIX)\$(TARGET).exe"
+	@echo   -> Installed to $(PREFIX)\$(TARGET).exe
+
+uninstall:
+	if exist "$(PREFIX)\$(TARGET).exe" del /f "$(PREFIX)\$(TARGET).exe"
+	@echo   -> Removed $(PREFIX)\$(TARGET).exe

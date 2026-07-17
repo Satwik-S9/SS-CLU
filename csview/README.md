@@ -21,11 +21,13 @@ A minimal zero-dependency command-line CSV pretty-printer that renders tabular d
 - Wraps long column headers onto two lines to keep column widths compact
 - Handles RFC 4180-compliant CSV: quoted fields, embedded commas, escaped double-quotes (`""`), CRLF and LF line endings
 - Reads from a file or from stdin (pipe-friendly)
-- Zero external dependencies — only the C standard library and POSIX
+- Zero external dependencies — only the C standard library
 
 ## Installation
 
-**Requirements:** GCC, GNU Make, a POSIX-compatible system (Linux, macOS, WSL)
+### Linux / macOS / WSL
+
+**Requirements:** GCC or Clang, GNU Make
 
 ```sh
 # Clone or download the source, then:
@@ -44,6 +46,27 @@ To uninstall:
 ```sh
 make uninstall
 # or: make uninstall PREFIX=/usr/local/bin
+```
+
+### Windows (native)
+
+**Requirements:** [LLVM](https://releases.llvm.org/) (`clang-cl.exe`), [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) (MSVC + Windows SDK), and `nmake` (ships with VS Build Tools)
+
+```bat
+nmake /f NMakefile
+nmake /f NMakefile install    :: copies to %USERPROFILE%\.local\bin
+```
+
+The `NMakefile` defaults to the VS 2022 Build Tools paths. If your installation differs, override them:
+
+```bat
+nmake /f NMakefile VCTOOLS="C:\path\to\MSVC\<ver>" WINSDK="C:\path\to\WindowsKits\10" SDKVER=10.0.XXXXX.0
+```
+
+To uninstall:
+
+```bat
+nmake /f NMakefile uninstall
 ```
 
 ## Usage
@@ -101,11 +124,16 @@ When the table is too wide for the terminal, middle columns are collapsed:
 ## Building from Source
 
 ```sh
+# Linux / macOS / WSL
 make        # build to build/csview
 make clean  # remove build artifacts
 ```
 
-Compiler flags: `-Wall -Wextra -pedantic -O2 -std=c11`
+```bat
+:: Windows
+nmake /f NMakefile
+nmake /f NMakefile clean
+```
 
 ## License
 

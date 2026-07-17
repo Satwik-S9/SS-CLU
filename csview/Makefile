@@ -1,12 +1,30 @@
-CC       := gcc
+# For Windows use NMakefile instead:  nmake /f NMakefile
+
+# Select the compiler (gcc preferred, then clang, then cc)
+CC_CANDIDATES := gcc clang cc
+CC             := $(firstword $(foreach c,$(CC_CANDIDATES),$(if $(shell command -v $(c) 2>/dev/null),$(c),)))
+ifeq ($(CC),)
+    $(error No C compiler found. Install gcc or clang, or set CC explicitly)
+endif
+
 CFLAGS   := -Wall -Wextra -pedantic -O2 -std=c11
 LDFLAGS  :=
+COMPILE   = $(CC) $(CFLAGS) -c -o $@ $<
+LINK      = $(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+OBJEXT   := o
+EXEEXT   :=
 
+# Source and Target details
+SRC      := csview.c
 TARGET   := csview
 BUILDDIR := build
-SRC      := csview.c
-OBJ      := $(BUILDDIR)/csview.o
-BIN      := $(BUILDDIR)/$(TARGET)
+OBJ      := $(BUILDDIR)/csview.$(OBJEXT)
+BIN      := $(BUILDDIR)/$(TARGET)$(EXEEXT)
+
+# Info messages
+$(info Detected OS: $(DETECTED_OS))
+$(info Using compiler: $(CC))
+$(info Building to: $(BUILDDIR))
 
 # Installation directory — override with:  make install PREFIX=~/bin
 PREFIX   ?= $(HOME)/.local/bin
@@ -19,11 +37,11 @@ $(BUILDDIR):
 	@mkdir -p $@
 
 $(BIN): $(OBJ)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(LINK)
 	@echo "  -> Built: $@"
 
 $(OBJ): $(SRC) | $(BUILDDIR)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(COMPILE)
 
 clean:
 	rm -rf $(BUILDDIR)
@@ -33,9 +51,9 @@ clean:
 # Override prefix with:  make install PREFIX=/usr/share/bin
 install: $(BIN)
 	@mkdir -p $(PREFIX)
-	install -m 755 $< $(PREFIX)/$(TARGET)
-	@echo "  -> Installed to $(PREFIX)/$(TARGET)"
+	install -m 755 $< $(PREFIX)/$(TARGET)$(EXEEXT)
+	@echo "  -> Installed to $(PREFIX)/$(TARGET)$(EXEEXT)"
 
 uninstall:
-	rm -f $(PREFIX)/$(TARGET)
-	@echo "  -> Removed $(PREFIX)/$(TARGET)"
+	rm -f $(PREFIX)/$(TARGET)$(EXEEXT)
+	@echo "  -> Removed $(PREFIX)/$(TARGET)$(EXEEXT)"
