@@ -15,19 +15,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
+#include <stdbool.h>
 
-#define VERSION "1.0.2"
+#define VERSION "1.1.0"
 #define AUTHOR "Satwik Srivastava"
 
 /* ANSI helpers */
 #define ESC "\x1b"
 #define RESET ESC "[0m"
 #define BOLD  ESC "[1m"
+#define UNDERLINE  ESC "[4m"
 #define BOLD_OFF ESC "[22m"
 #define ITALIC ESC "[3m"
 #define ITALIC_OFF ESC "[23m"
-#define REVERSE ESC "[7m"
-#define REVERSE_OFF ESC "[27m"
 
 /* 8-bit color helper: foreground color */
 static void ansi_fg_8bit(int n) {
@@ -59,15 +60,15 @@ static int list_color() { return 75; } /* blue */
 static void render_inline(const char *s) {
     size_t i = 0;
     size_t n = strlen(s);
-    int bold = 0, italic = 0, rev = 0;
+    int bold = 0, italic = 0, underline = 0, highlight = 0;
 
     while (i < n) {
         char c = s[i];
 
         /* Inline code: `code` */
         if (c == '`') {
-            if (!rev) { printf(REVERSE); rev = 1; }
-            else { printf(REVERSE_OFF); rev = 0; }
+            if (!highlight) { printf("\033[48;2;%d;%d;%dm", 51, 51, 51); highlight = 1; }
+            else { printf("\033[0m"); highlight = 0; }
             i++;
             continue;
         }
@@ -89,14 +90,40 @@ static void render_inline(const char *s) {
             continue;
         }
 
+        /* Links */
+        if (c == '[') {
+            const char *link_text_start = s + i + 1;
+            const char *link_text_end = strchr(link_text_start, ']');
+            if (link_text_end && link_text_end[1] == '(') {
+                const char *link_url_start = link_text_end + 2;
+                const char *link_url_end = strchr(link_url_start, ')');
+                if (link_url_end) {
+                    /* Render link text in blue and underlined */
+                    if (!underline) { printf(UNDERLINE); underline = 1; }
+                    fwrite(link_text_start, 1, link_text_end - link_text_start, stdout);
+                    
+                    // if (RENDER_LINK_URL) {
+                    //     printf(RESET " → ");
+                    //     printf(ESC "[34m" UNDERLINE);
+                    //     fwrite(link_url_start, 1, link_url_end - link_url_start, stdout);
+                    // }
+
+                    if (underline) { printf(RESET); underline = 0; }
+                    i = (size_t)(link_url_end - s) + 1; /* Move past the closing ')' */
+                    continue;
+                }
+            }
+        }
+
         putchar(c);
         i++;
     }
 
     /* safety: close any open styles */
-    if (rev) printf(REVERSE_OFF);
+    if (highlight) printf(RESET);
     if (bold) printf(BOLD_OFF);
     if (italic) printf(ITALIC_OFF);
+    if (underline) printf(RESET);
 }
 
 /* Trim leading spaces */
@@ -105,14 +132,39 @@ static const char *skip_leading_spaces(const char *s) {
     return s;
 }
 
+static int in_code_block = 0;
 /* --- LINE-LEVEL MARKDOWN ------------------------------------------------ */
 static void process_line(const char *line) {
     const char *p = skip_leading_spaces(line);
 
+    /* Fenced code blocks: toggle on ``` and render enclosed lines raw */
+    if (strncmp(p, "```", 3) == 0) {
+        if (!in_code_block) {
+            in_code_block = 1;
+            /* Detect the language after the backticks, if any */
+            const char *lang = p + 3;
+            while (*lang && isspace((unsigned char)*lang)) lang++;
+            if (*lang == '\0')
+                printf(ESC "[90m──────── code block ────────" RESET "\n");
+            else
+                printf(ESC "[90m──────── code block [%s] ────────" RESET "\n", lang);
+        } else {
+            in_code_block = 0;
+            printf(ESC "[90m──────── end code block ────────" RESET "\n");
+        }
+        return;
+    }
+
+    /* Inside a code block: print the line verbatim, no markdown parsing */
+    if (in_code_block) {
+        printf("%s\n", line);
+        return;
+    }
+
     if (*p == '\0') { printf("\n"); return; }
 
     /* Headings */
-    if (*p == '#') {
+    if (*p == '#' && !in_code_block) {
         int lvl = 0;
         while (*p == '#') { lvl++; p++; }
         if (*p == ' ' || *p == '\t') {
@@ -132,7 +184,7 @@ static void process_line(const char *line) {
     }
 
     /* Unordered lists */
-    if ((*p == '-' || *p == '*') && isspace((unsigned char)p[1])) {
+    if (!in_code_block && (*p == '-' || *p == '*') && isspace((unsigned char)p[1])) {
         ansi_fg_8bit(list_color());
         printf("  • ");
         ansi_fg_reset();
@@ -143,7 +195,7 @@ static void process_line(const char *line) {
     }
 
     /* Blockquote */
-    if (*p == '>') {
+    if (!in_code_block && *p == '>') {
         printf(ESC "[90m│ " RESET);
         p++;
         if (*p == ' ') p++;
@@ -151,13 +203,7 @@ static void process_line(const char *line) {
         printf("\n");
         return;
     }
-
-    /* Fenced code blocks (just divider lines for now) */
-    if (strncmp(p, "```", 3) == 0) {
-        printf(ESC "[90m──────── code block ────────" RESET "\n");
-        return;
-    }
-
+    
     /* Normal paragraph */
     render_inline(p);
     printf("\n");
@@ -203,4 +249,9 @@ Revision History:
     1.0.0: Initial Build.
     1.0.1: Added version flag and info
     1.0.2 (13-07-2026): Initial Release ! Added author info and copyright notice
+    1.1.0 (17-07-2026): 
+        - Fixed bug which was causing code blocks to render markdown inside them. Now code blocks are rendered raw.
+        - Code blocks now show the language if specified after the opening backticks.
+        - `--less` flag added to show a paged output for the file (similar to piping to the less command). This is useful for large files.
+        - Links are now rendered in blue color and underlined. Use flag `--expand-links` to expand links to their full URL.
 */

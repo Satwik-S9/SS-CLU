@@ -1,9 +1,5 @@
 # Select the compiler
-CC_CANDIDATES := gcc clang cc
-CC             := $(firstword $(foreach c,$(CC_CANDIDATES),$(if $(shell $(WHICH) $(c) 2>$(NULL_DEV)),$(c),)))
-ifeq ($(CC),)
-    $(error No C compiler found. Install gcc or clang, or set CC explicitly)
-endif
+CC := cc
 
 # Compiler and Linker flags, plus compile/link command templates.
 CFLAGS   := -Wall -Wextra -pedantic -O2 -std=c11

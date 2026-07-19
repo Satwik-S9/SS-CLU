@@ -3,10 +3,22 @@
 A minimal, zero-dependency terminal Markdown renderer. Reads a `.md` file and prints it to the terminal with ANSI color and style formatting — making Markdown readable without leaving your shell.
 
 **Author:** Satwik Srivastava 
-**Version:** 1.0.2  
+**Version:** 1.1.0  
 **License:** MIT
 
 ---
+
+## Goals and NonGoals
+### What this is
+1. This is a simple no-external dependency tool which quicly renders a markdown file by changing the 
+highlighting adding some native decorations around simple blocks providing a sense of quick readability 
+to the file.
+2. I have personally designed this for me to quickly view md files without leaving the terminal
+
+### What this isn't
+1. A full blown beutified terminal based markdown viewer
+2. A highly customizable and themable tool
+
 
 ## Features
 
@@ -45,6 +57,7 @@ Output binary: `build/mdview`
 
 **Manually with GCC:**
 ```bash
+# Comment for bash
 gcc -std=c11 -O2 -o mdview mdview.c
 ```
 
@@ -81,7 +94,16 @@ make clean
 
 ANSI escape codes are required for styled output. Most modern terminal emulators support them.
 
+## Update Plan
+### V1.1.0
+- [x] '#' character in code-block should not be interpreted as a heading.
+- [ ] a '--less' option should be there which shows the output as paged instead of printing everything to stdout
+- [ ] Links to be rendered with an underline and the underlying link should be hidden unless `--expand-links` flag is provided
+- [x] Revision history to be appended at the end of the file mdview.c
+- [x] Add a goals and non-goals statement to README file to contrain the scope of the project and not have it branched out into something too complex.
+- [ ] Add support for ordered list and tables
+
+
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
-
