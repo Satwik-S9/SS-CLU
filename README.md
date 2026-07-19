@@ -9,7 +9,7 @@ A collection of small, self-contained command-line utilities. Each tool lives in
 | Tool | Version | Language | Description |
 |------|---------|----------|-------------|
 | [csview](#csview) | 1.1.0 | C (C11) | CSV pretty-printer with Unicode table borders |
-| [mdview](#mdview) | 1.0.2 | C (C11) | Minimal Markdown renderer for the terminal |
+| [mdview](#mdview) | 1.1.0 | C (C11) | Minimal Markdown renderer for the terminal |
 | [todext](#todext) | 1.2 | C++ (C++17) | Source-code annotation extractor (TODO/BUG/NOTE) |
 
 ---
