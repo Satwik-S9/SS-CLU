@@ -27,11 +27,19 @@
 
 #define MAX_SPANS 6
 
-// Highlights for Homepage
+// Highlights for Homepage :: To be moved to a separate config file
 #define S_DIM    "38;5;240"
 #define S_TEXT   "38;5;250"
 #define S_KEY    "1;38;5;252"
 #define S_ACCENT "38;2;133;153;0"
+
+// Mod Keys !!
+#define MOD_SHIFT 0x01
+#define MOD_ALT   0x02
+#define MOD_CTRL  0x04
+
+// Default Tab Size
+#define DEFAULT_TAB_SIZE 4
 
 /* Data */
 
@@ -44,7 +52,8 @@ typedef enum {
 
 
 typedef enum {
-	ARROW_LEFT  = 1000,
+    // Nav Keys
+    ARROW_LEFT  = 1000,
 	ARROW_RIGHT,
 	ARROW_DOWN,
 	ARROW_UP,
@@ -52,9 +61,13 @@ typedef enum {
 	PAGE_DOWN,
 	HOME,
 	END,
+	CTRL_HOME,
+	CTRL_END,
+	// Editing Keys
 	DELETE,
 	BACKSPACE,
-	RETURN
+	RETURN,
+	//
 } BE_Key;
 
 
@@ -81,7 +94,7 @@ typedef struct {
 static const BE_Line homepage[] = {
 	{ {{S_DIM, "▄▄▄  ▄  ▄  ▄   ▄"}},                                    1, AL_CENTER },
 	{ {{NULL, "\r\n"}},                                                     1, AL_CENTER },
-    { {{S_KEY,"be"},{S_TEXT," — a basic editor   "}, 
+    { {{S_KEY,"be"},{S_TEXT," — a basic editor   "},
 	   {S_DIM,"v" BASIC_EDITOR_VERSION}},                               3, AL_CENTER },
 	{ {{S_DIM, "quick edits, no hassle."}},                             1, AL_CENTER },
 	{ {{NULL, "\r\n"}},                                                     1, AL_CENTER },
@@ -96,7 +109,7 @@ static const BE_Line homepage[] = {
 	{ {{S_KEY,"↑↓←→    "},{S_TEXT,"move · Home / End · PgUp / PgDn\r\n"}},   2, AL_BLOCK  },
 	{ {{NULL, "\r\n"}},                                                     1, AL_CENTER },
 	{ {{S_DIM,"press "},{S_KEY,"Enter"},
-	   {S_DIM," to open a file — or "},{S_KEY,"Ctrl+P"}, 
+	   {S_DIM," to open a file — or "},{S_KEY,"Ctrl+P"},
 	   {S_DIM," for commands"}},                                        5, AL_CENTER },
 };
 
@@ -104,12 +117,15 @@ static const BE_Line homepage[] = {
 typedef struct {
 	// int cx, cy;
 	int size;
+	int rsize;
 	char *data;
+	char *render;
 } BE_Row;
 
 typedef struct {
 	int    	def_x, def_y;
 	int    	cur_x, cur_y;
+	int     row_x;
 	int    	rowoff;
 	int 	coloff;
 	int    	screenrows;
@@ -120,6 +136,8 @@ typedef struct {
 } BE_State;
 
 static BE_State state;
+
+void be_die(const char *s);
 
 /* String Builder */
 typedef struct {
@@ -143,7 +161,9 @@ void sb_append(StringBuilder *sb, const char *str) {
                 size_t new_cap = sb->cap ? sb->cap : 16; // escape the cap==0 trap
                 while (new_cap < needed)
                         new_cap *= 2;
-                sb->data = realloc(sb->data, new_cap);
+                char *new_data = realloc(sb->data, new_cap);
+                if (!new_data) { free(sb->data); be_die("realloc"); }
+                sb->data = new_data;
                 sb->cap = new_cap;
         }
 
@@ -222,47 +242,76 @@ int be_readKey() {
 	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
 		if (nread == -1 && errno != EAGAIN) be_die("read");
 	}
-	
-	if (c == '\x1b') {
-		char seq[3];
-		if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
-		if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
 
-		if (seq[0] == '[') {
-			if (seq[1] > '0' && seq[1] < '9') {
-				if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
-				if (seq[2] == '~') {
-					switch (seq[1]) {
-						case '1': return HOME;
-						case '3': return DELETE;
-						case '4': return END;
-						case '5': return PAGE_UP;
-						case '6': return PAGE_DOWN;
-						case '7': return HOME;
-						case '8': return END;
-					}
-				}
-
-			} else {
-				switch (seq[1]) {
-					case 'A': return ARROW_UP;
-					case 'B': return ARROW_DOWN;
-					case 'C': return ARROW_RIGHT;
-					case 'D': return ARROW_LEFT;
-					case 'H': return HOME;
-					case 'F': return END;
-				}
-			}
-		} else if (seq[0] == 'O') {
-			switch (seq[1]) {
-				case 'H': return HOME;
-				case 'F': return END;
-			}
-		}
-		return '\x1b';
-	} else {
-		return c;
+	if (c != '\x1b') {
+	    return (unsigned char)c;
 	}
+
+	char ch;
+	if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
+
+ /* SS3 form: ESC O <final>. Never carries modifiers. */
+    if (ch == 'O') {
+            if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
+            switch (ch) {
+            case 'H': return HOME;
+            case 'F': return END;
+            case 'A': return ARROW_UP;
+            case 'B': return ARROW_DOWN;
+            case 'C': return ARROW_RIGHT;
+            case 'D': return ARROW_LEFT;
+            }
+            return '\x1b';
+    }
+
+    if (ch != '[') return '\x1b';
+
+    /* CSI form: collect params until a final byte (0x40-0x7E). */
+    char seq[24];
+    size_t n = 0;
+    char final = 0;
+
+    while (n < sizeof(seq) - 1) {
+        if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
+        if (ch >= 0x40 && ch <= 0x7E) {
+            final = ch;
+            break;
+        }
+        seq[n++] = ch;
+    }
+    seq[n] = '\0';
+    if (final == 0) return '\x1b';
+
+    int p1 = 1, p2 = 1;
+    sscanf(seq, "%d;%d", &p1, &p2);
+    int mods = p2-1;
+
+    switch (final) {
+        case 'H': return (mods & MOD_CTRL) ? CTRL_HOME : HOME;
+        case 'F': return (mods & MOD_CTRL) ? CTRL_END : END;
+        case 'A': return ARROW_UP;
+        case 'B': return ARROW_DOWN;
+        case 'C': return ARROW_RIGHT;
+        case 'D': return ARROW_LEFT;
+
+        case '~':
+            switch (p1) {
+                case 1: case 7: return (mods & MOD_CTRL) ? CTRL_HOME : HOME;
+                case 4: case 8: return (mods & MOD_CTRL) ? CTRL_END : END;
+                case 3: return DELETE;
+                case 5: return PAGE_UP;
+                case 6: return PAGE_DOWN;
+            }
+            break;
+
+        case '^':
+            switch (p1) {
+                case 7: return CTRL_HOME;
+                case 8: return CTRL_END;
+            }
+            break;
+    }
+    return '\x1b';
 }
 
 int be_getCursorPos(int *rows, int *cols) {
@@ -277,7 +326,7 @@ int be_getCursorPos(int *rows, int *cols) {
 		i++;
 	}
 	buf[i] = '\0';
-	
+
 	if (buf[0] != '\x1b' || buf[1] != '[') return -1;
 	if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
 	return 0;
@@ -338,15 +387,15 @@ int be_drawRows(StringBuilder *sb) {
 		}
 		else {
 			// Determine line length
-			int len = state.row[filerow].size - state.coloff;
+			int len = state.row[filerow].rsize - state.coloff;
 			if (len < 0) len = 0;
 			if (len > state.screencols) len = state.screencols;
 			// Append line-no to the line
 			char linenum[32];
-			snprintf(linenum, sizeof(linenum), "%s%5d│ %s", "\x1b["S_DIM"m", y+1, "\x1b[0m");
+			snprintf(linenum, sizeof(linenum), "%s%5d│ %s", "\x1b["S_DIM"m", filerow+1, "\x1b[0m");
 			sb_append(sb, linenum);
 
-			sb_append(sb, &state.row[filerow].data[state.coloff]);
+			sb_append(sb, &state.row[filerow].render[state.coloff]);
 			res = 0;
 		}
 		sb_append(sb, "\x1b[K");
@@ -360,7 +409,7 @@ int be_drawRows(StringBuilder *sb) {
 }
 
 void be_drawWelcomeMsg(StringBuilder *sb, const char *msg) {
-	/* 
+	/*
 	* Doing a redundant check for now just to make sure logo does not render
 	* on file open ...
 	*/
@@ -416,18 +465,32 @@ void be_drawHomepage(StringBuilder *sb) {
 	be_moveCursor(sb, state.def_x, state.def_y);
 }
 
+int be_calculateRx(BE_Row *row, int cx) {
+    int rx = 0;
+    for (int j = 0; j < cx; j++) {
+        if (row->data[j] == '\t')
+            rx += (DEFAULT_TAB_SIZE - 1) - (rx % DEFAULT_TAB_SIZE);
+        rx++;
+    }
+    return rx;
+}
+
 void editorScroll() {
-	if (state.cur_y < state.rowoff) {
+    if (state.cur_y < state.numrows) {
+      state.row_x = be_calculateRx(&state.row[state.cur_y], state.cur_x);
+    }
+
+    if (state.cur_y < state.rowoff) {
 		state.rowoff = state.cur_y;
 	}
 	if (state.cur_y >= state.rowoff + state.screenrows) {
 		state.rowoff = state.cur_y - state.screenrows + 1;
 	}
-	if (state.cur_x < state.coloff) {
-		state.coloff = state.cur_x;
+	if (state.row_x < state.coloff) {
+		state.coloff = state.row_x;
 	}
 	if (state.cur_x >= state.coloff + state.screencols) {
-		state.coloff = state.cur_x - state.screencols + 1;
+		state.coloff = state.row_x - state.screencols + 1;
 	}
 }
 
@@ -454,8 +517,8 @@ void be_refreshScreen() {
 
 	// Handle cursor movement
 	char buf[32];
-	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", 
-			(state.cur_y - state.rowoff) + 1, (state.cur_x - state.coloff) + 1);
+	snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
+			(state.cur_y - state.rowoff) + 1, (state.row_x - state.coloff) + 1);
 	sb_append(&sb, buf);
 
 	size_t res = write(STDOUT_FILENO, sb.data, sb.len);
@@ -481,9 +544,9 @@ void be_handleArrowKeys(int key) {
 		case ARROW_RIGHT:
 			if (row && state.cur_x < row->size + state.def_x) {
 				state.cur_x++;
-			} else if (row && state.cur_x == row->size) {
+			} else if (row && state.cur_x == row->size + state.def_x) {
 				state.cur_y++;
-				state.cur_x = 0;
+				state.cur_x = state.def_x;
 			}
 			break;
 		case ARROW_UP:
@@ -514,6 +577,16 @@ void be_processKeypress() {
 			exit(0);
 			break;
 
+		case CTRL_KEY('t'):
+            state.cur_x = state.def_x;
+            state.cur_y = state.def_y;
+            break;
+
+		case CTRL_KEY('e'):
+            state.cur_y = state.numrows;
+            break;
+
+
 		case HOME:
 			state.cur_x = state.def_x;
 			break;
@@ -524,14 +597,30 @@ void be_processKeypress() {
 			// state.cur_x = state.screencols - 1;
 			break;
 
+		// BUG: This is not working for me !!
+	    case CTRL_HOME:
+		    state.cur_x = state.def_x;
+			state.cur_y = state.def_y;
+		    break;
+		case CTRL_END:
+		    state.cur_y = state.numrows;
+		    break;
+
 		case PAGE_UP:
 		case PAGE_DOWN:
 			{
+			    if (c == PAGE_UP) {
+					state.cur_y = state.rowoff;
+				} else if (c == PAGE_DOWN) {
+				    state.cur_y = state.rowoff + state.screenrows - 1;
+    				if (state.cur_y > state.numrows) state.cur_y = state.numrows;
+			    }
+
 				int times = state.screenrows / 2;
 				while (times--) {
 					be_handleArrowKeys(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
 				}
-			} 
+			}
 			break;
 		case ARROW_UP:
 		case ARROW_DOWN:
@@ -543,13 +632,43 @@ void be_processKeypress() {
 }
 
 /* Row Operations */
+void be_updateRow(BE_Row *row) {
+    int j;
+    int tabs = 0;
+    for (j = 0; j < row->size; j++)
+        if (row->data[j] == '\t') tabs++;
+
+    if (row->render != NULL) free(row->render);
+    row->render = malloc(row->size + tabs*(DEFAULT_TAB_SIZE - 1) + 1);
+
+    int idx = 0;
+    for (j = 0; j < row->size; j++) {
+        if (row->data[j] == '\t') {
+            row->render[idx++] = ' ';
+            while (idx % DEFAULT_TAB_SIZE != 0) row->render[idx++] = ' ';
+        } else {
+            row->render[idx++] = row->data[j];
+        }
+    }
+    row->render[idx] = '\0';
+    row->rsize = idx;
+}
+
 void be_appendRow(char *s, size_t len) {
-	state.row = realloc(state.row, sizeof(BE_Row) * (state.numrows + 1));
+	BE_Row *new_row = realloc(state.row, sizeof(BE_Row) * (state.numrows + 1));
+	if (!new_row) { free(state.row); be_die("realloc"); }
+
+	state.row = new_row;
 	int at = state.numrows;
 	state.row[at].size = len;
 	state.row[at].data = malloc(len+1);
 	memcpy(state.row[at].data, s, len);
 	state.row[at].data[len] = '\0';
+
+	state.row[at].rsize = 0;
+	state.row[at].render = NULL;
+	be_updateRow(&state.row[at]);
+
 	state.numrows++;
 }
 
@@ -558,7 +677,7 @@ void be_openFile(const char *filename) {
 	FILE *fp = fopen(filename, "r");
 	if (!fp) be_die("Could not open file !!");
 
-	char *line = NULL; 
+	char *line = NULL;
 	size_t linecap = 0;
 	ssize_t linelen;
 
@@ -573,17 +692,27 @@ void be_openFile(const char *filename) {
 }
 
 /* Initialization */
+void be_freeEditor(void) {
+	for (int i = 0; i < state.numrows; i++)
+		free(state.row[i].data);
+	free(state.row);
+	state.row = NULL;
+	state.numrows = 0;
+}
+
 void be_initEditor() {
 	state.def_x = 0;
 	state.def_y = 0;
 	state.cur_x = 0;
 	state.cur_y = 0;
+	state.row_x = 0;
 
 	state.rowoff = 0;
 	state.coloff = 0;
 
 	state.numrows = 0;
 	state.row = NULL;
+	atexit(be_freeEditor);
 
 
 	if (be_getWindowSize(&state.screenrows, &state.screencols) == -1) be_die("be_getWindowSize");
@@ -601,6 +730,7 @@ int main(int argc, char **argv) {
 	if (state.numrows > 0) {
 		state.def_x = 7;
 		state.cur_x = state.def_x;
+		state.row_x = state.cur_x;
 	}
 
     while (1) {
