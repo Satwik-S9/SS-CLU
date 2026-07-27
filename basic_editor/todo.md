@@ -3,16 +3,17 @@
 - [x] Draw the basic-editor welcome message in the center of the editor
     - NOTE: Opening a file opens the buffer and the welcome message is now removed (Screen Refreshes)
 - [x] Enable cursor moving and basic text editing in the editor
+- [x] Full word processing based navigation. CTRL+HOME, CTRL+END, PAGEUP, PAGEDOWN, HOME, END should be handled
 
 # Planned Features
-1. `+<ROW>:<COL>` flag to have editor open a specific row, column of the provided text file.
-2. Syntax Highlighting using predefined keyword matching by baking the keywords file at compile time into the program (Or it can also have the file load at file opening time).
-3. Command bar using CTRL+P
-4. Full word processing based navigation. CTRL+HOME, CTRL+END, PAGEUP, PAGEDOWN, HOME, END, DEL, BACKSPACE, CTRL+DEL, CTRL+BACKSPACE and CTRL+ARROW keys should be handled
-5. A very basic configuration file containing (config.h)
+- `+<ROW>:<COL>` flag to have editor open a specific row, column of the provided text file.
+- Syntax Highlighting using predefined keyword matching by baking the keywords file at compile time into the program (Or it can also have the file load at file opening time).
+- Command bar using CTRL+P
+- A very basic configuration file containing (config.h)
   - How many spaces should each tab use (DEFAULT: 4)
   - Colorschemes to use: Default Terminal Colors
-6. Refine the cursor position logic (Calculating rx on tabs)
+- Refine the cursor position logic (Calculating rx on tabs)
+- DEL, BACKSPACE, CTRL+DEL, CTRL+BACKSPACE and CTRL+ARROW keys should be handled
 
 ## Keymaps
 1. `CTRL + SHIFT + E`: Goto the end of the file

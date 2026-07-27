@@ -10,6 +10,8 @@
 #include <sys/ioctl.h>
 #include <stdbool.h>
 
+#include "config.h"
+
 /* Defines */
 
 #define _BSD_SOURCE
@@ -122,6 +124,7 @@ typedef struct {
 	char *render;
 } BE_Row;
 
+
 typedef struct {
 	int    	def_x, def_y;
 	int    	cur_x, cur_y;
@@ -132,12 +135,15 @@ typedef struct {
 	int    	screencols;
 	int    	numrows;
 	BE_Row 	*row;
+	char	*filename;
 	struct 	termios orig_termios;
 } BE_State;
+
 
 static BE_State state;
 
 void be_die(const char *s);
+
 
 /* String Builder */
 typedef struct {
@@ -177,6 +183,31 @@ void sb_free(StringBuilder *sb) {
         sb->len = sb->cap = 0;
 }
 
+/* Helper funcitons */
+int hex2int(char hex) {
+	if (hex >= '0' && hex <= '9') return hex - '0';
+	switch (hex) {
+		case 'a': case 'A': return 10;
+		case 'b': case 'B': return 11;
+		case 'c': case 'C': return 12;
+		case 'd': case 'D': return 13;
+		case 'e': case 'E': return 14;
+		case 'f': case 'F': return 15;
+	}
+	return 0;
+}
+
+void hex2rgb(int *r, int *g, int *b, char *hexcode) {
+	if (strlen(hexcode) != 7) {
+		*r = -1; *g = -1; *b = -1;
+	}
+
+	char *res = strchr(hexcode, '#') + 1;
+	*r = (hex2int(res[0]) * 16) + hex2int(res[1]);
+	*g = (hex2int(res[2]) * 16) + hex2int(res[3]);
+	*b = (hex2int(res[4]) * 16) + hex2int(res[5]);
+}
+
 /* Terminal */
 void be_check_and_raise(bool expr, const char *err_msg, BE_ErrorKind err_kind) {
 	char *err_head;
@@ -204,9 +235,9 @@ void be_check_and_raise(bool expr, const char *err_msg, BE_ErrorKind err_kind) {
 }
 
 void be_die(const char *s) {
-	int res = write(STDOUT_FILENO, "\x1b[2J", 4);
-	res += write(STDOUT_FILENO, "\x1b[H", 3);
-	be_check_and_raise(res != 7, "Could not clear screen for be_die function", BE_ERR_OP);
+	// int res = write(STDOUT_FILENO, "\x1b[2J", 4);
+	// res += write(STDOUT_FILENO, "\x1b[H", 3);
+	// be_check_and_raise(res != 7, "Could not clear screen for be_die function", BE_ERR_OP);
 
     perror(s);
     exit(1);
@@ -381,9 +412,9 @@ int be_drawRows(StringBuilder *sb) {
 			if (y < state.screenrows - 1) {
 				sb_append(sb, "~");
 			}
-			else {
-				sb_append(sb, "Made with ♡ by srivsatava.s");
-			}
+			// else {
+			// 	sb_append(sb, "Made with ♡ by srivsatava.s");
+			// }
 		}
 		else {
 			// Determine line length
@@ -399,7 +430,7 @@ int be_drawRows(StringBuilder *sb) {
 			res = 0;
 		}
 		sb_append(sb, "\x1b[K");
-		if (y < state.screenrows - 1) sb_append(sb, "\r\n");
+		sb_append(sb, "\r\n");
 	}
 
 	// Bring back cursor :: After drawing rows
@@ -408,22 +439,51 @@ int be_drawRows(StringBuilder *sb) {
 	return res;
 }
 
-void be_drawWelcomeMsg(StringBuilder *sb, const char *msg) {
-	/*
-	* Doing a redundant check for now just to make sure logo does not render
-	* on file open ...
-	*/
-	if (state.numrows == 0) {
-		int wlcmlen = strlen(msg);
-		int cx = (state.screencols - wlcmlen)/2;
-		int cy = state.screenrows / 2;
-		be_moveCursor(sb, cx, cy);
-		sb_append(sb, msg);
+void be_drawStatusBar(StringBuilder *sb) {
+	// Move the cursor to the right position (END)
+	be_moveCursor(sb, 0, state.screenrows);
 
-		// Bring back cursor :: After drawing message
-		sb_append(sb, "\x1b[H");
-		sb_append(sb, "\x1b[?25h");
+	// Prepare the foreground and background sequences
+	int br, bg, bb;
+	int fr, fg, fb;
+	char backbuf[32];
+	char forebuf[32];
+	hex2rgb(&br, &bg, &bb, STATUS_BAR_BACKGROUND);
+	hex2rgb(&fr, &fg, &fb, STATUS_BAR_FOREGROUND);
+
+	snprintf(backbuf, sizeof(backbuf), "\033[48;2;%d;%d;%dm", br, bg, bb);
+	snprintf(forebuf, sizeof(forebuf), "\033[38;2;%d;%d;%dm", fr, fg, fb);
+
+	sb_append(sb, backbuf); // set the background
+	sb_append(sb, forebuf); // set the foreground
+
+	// Define the left, right and center status buffers
+	char lstatus[80], rstatus[120];
+	// Prepare the left status
+	int len = snprintf(lstatus, sizeof(lstatus), "   ✽ | %.20s | [%d:%d|%d]",
+		state.filename ? state.filename : "[No Name]",
+		state.cur_y+1, state.cur_x - state.def_x + 1, state.numrows
+	);
+	if (len > state.screencols) len = state.screencols;
+	
+	// Prepare the right status
+	int rlen = snprintf(rstatus, sizeof(rstatus), "^ S Save | ^ Q Quit | ^ P Cmd Pallete");
+
+	// Append status' to rendering buffer 
+	sb_append(sb, lstatus);
+	while (len < state.screencols) {
+		if (state.screencols - len == rlen) {
+			sb_append(sb, rstatus);
+			break;
+		} else {
+			sb_append(sb, " ");
+			len++;
+		}
 	}
+
+	// Reset & Move cursor back to start
+	sb_append(sb, "\x1b[0m");
+	be_moveCursor(sb, state.def_x, state.def_y);
 }
 
 void be_drawHomepage(StringBuilder *sb) {
@@ -507,6 +567,7 @@ void be_refreshScreen() {
 
 	// Draw Rows !!
 	int draw_wlcm = be_drawRows(&sb);
+	be_drawStatusBar(&sb);
 
 	if (draw_wlcm) {
 		// Move Cursor to the center and write something
@@ -674,6 +735,9 @@ void be_appendRow(char *s, size_t len) {
 
 /* File I/O */
 void be_openFile(const char *filename) {
+	if (state.filename != NULL) free(state.filename);
+	state.filename = strdup(filename);
+
 	FILE *fp = fopen(filename, "r");
 	if (!fp) be_die("Could not open file !!");
 
@@ -712,10 +776,12 @@ void be_initEditor() {
 
 	state.numrows = 0;
 	state.row = NULL;
+	state.filename = NULL;
 	atexit(be_freeEditor);
 
 
 	if (be_getWindowSize(&state.screenrows, &state.screencols) == -1) be_die("be_getWindowSize");
+	state.screenrows -= 1;
 }
 
 /* Main Loop */
