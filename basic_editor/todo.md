@@ -4,6 +4,12 @@
     - NOTE: Opening a file opens the buffer and the welcome message is now removed (Screen Refreshes)
 - [x] Enable cursor moving and basic text editing in the editor
 - [x] Full word processing based navigation. CTRL+HOME, CTRL+END, PAGEUP, PAGEDOWN, HOME, END should be handled
+- [ ] Convert the current text viewer to a text editor
+- [ ] Port all configuration to config.h file
+- [ ] Unify some interfaces
+- [ ] Make command pallete and also have a switch theme functionality for it 
+- [ ] Port row also into a string builder
+
 
 # Planned Features
 - `+<ROW>:<COL>` flag to have editor open a specific row, column of the provided text file.

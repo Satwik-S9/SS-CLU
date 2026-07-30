@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <stdbool.h>
+#include <time.h>
+#include <stdarg.h>
 
 #include "config.h"
 
@@ -30,9 +32,17 @@
 #define MAX_SPANS 6
 
 // Highlights for Homepage :: To be moved to a separate config file
+#ifdef LIGHT_THEME_MODE
+	#define S_KEY  "38;2;150;150;150"
+	#define S_TEXT "38;2;166;166;166"
+#endif
+
+#ifdef DARK_THEME_MODE
+	#define S_KEY    "1;38;5;252"
+	#define S_TEXT   "38;5;250"
+#endif
+
 #define S_DIM    "38;5;240"
-#define S_TEXT   "38;5;250"
-#define S_KEY    "1;38;5;252"
 #define S_ACCENT "38;2;133;153;0"
 
 // Mod Keys !!
@@ -42,6 +52,9 @@
 
 // Default Tab Size
 #define DEFAULT_TAB_SIZE 4
+
+// Load Statusbar theme
+static struct StatusBar_Theme sb_theme = { STATUS_BAR_BACKGROUND, STATUS_BAR_FOREGROUND};
 
 /* Data */
 
@@ -54,6 +67,8 @@ typedef enum {
 
 
 typedef enum {
+	// Editing Keys
+	BACKSPACE = 127,
     // Nav Keys
     ARROW_LEFT  = 1000,
 	ARROW_RIGHT,
@@ -65,11 +80,7 @@ typedef enum {
 	END,
 	CTRL_HOME,
 	CTRL_END,
-	// Editing Keys
 	DELETE,
-	BACKSPACE,
-	RETURN,
-	//
 } BE_Key;
 
 
@@ -77,6 +88,11 @@ typedef enum {
 	AL_CENTER,
 	AL_BLOCK
 } BE_Align;
+
+typedef enum {
+	SPLASH,
+	EDIT
+} BE_Mode;
 
 
 typedef struct {
@@ -134,16 +150,22 @@ typedef struct {
 	int    	screenrows;
 	int    	screencols;
 	int    	numrows;
+	bool	dirty;
 	BE_Row 	*row;
+	BE_Mode	mode;
 	char	*filename;
+	char	statusmsg[80];
+	time_t	statusmsg_time;
 	struct 	termios orig_termios;
 } BE_State;
 
 
 static BE_State state;
 
+// Forward Declarations for some functions
 void be_die(const char *s);
-
+void be_openBlankFile(void);
+void be_editorInsertChar(int c);
 
 /* String Builder */
 typedef struct {
@@ -422,7 +444,7 @@ int be_drawRows(StringBuilder *sb) {
 			if (len < 0) len = 0;
 			if (len > state.screencols) len = state.screencols;
 			// Append line-no to the line
-			char linenum[32];
+			char linenum[64];
 			snprintf(linenum, sizeof(linenum), "%s%5d│ %s", "\x1b["S_DIM"m", filerow+1, "\x1b[0m");
 			sb_append(sb, linenum);
 
@@ -448,8 +470,8 @@ void be_drawStatusBar(StringBuilder *sb) {
 	int fr, fg, fb;
 	char backbuf[32];
 	char forebuf[32];
-	hex2rgb(&br, &bg, &bb, STATUS_BAR_BACKGROUND);
-	hex2rgb(&fr, &fg, &fb, STATUS_BAR_FOREGROUND);
+	hex2rgb(&br, &bg, &bb, sb_theme.sb_background);
+	hex2rgb(&fr, &fg, &fb, sb_theme.sb_foreground);
 
 	snprintf(backbuf, sizeof(backbuf), "\033[48;2;%d;%d;%dm", br, bg, bb);
 	snprintf(forebuf, sizeof(forebuf), "\033[38;2;%d;%d;%dm", fr, fg, fb);
@@ -465,11 +487,11 @@ void be_drawStatusBar(StringBuilder *sb) {
 		state.cur_y+1, state.cur_x - state.def_x + 1, state.numrows
 	);
 	if (len > state.screencols) len = state.screencols;
-	
+
 	// Prepare the right status
 	int rlen = snprintf(rstatus, sizeof(rstatus), "^ S Save | ^ Q Quit | ^ P Cmd Pallete");
 
-	// Append status' to rendering buffer 
+	// Append status' to rendering buffer
 	sb_append(sb, lstatus);
 	while (len < state.screencols) {
 		if (state.screencols - len == rlen) {
@@ -523,69 +545,7 @@ void be_drawHomepage(StringBuilder *sb) {
 
 	// Move cursor back to start
 	be_moveCursor(sb, state.def_x, state.def_y);
-}
-
-int be_calculateRx(BE_Row *row, int cx) {
-    int rx = 0;
-    for (int j = 0; j < cx; j++) {
-        if (row->data[j] == '\t')
-            rx += (DEFAULT_TAB_SIZE - 1) - (rx % DEFAULT_TAB_SIZE);
-        rx++;
-    }
-    return rx;
-}
-
-void editorScroll() {
-    if (state.cur_y < state.numrows) {
-      state.row_x = be_calculateRx(&state.row[state.cur_y], state.cur_x);
-    }
-
-    if (state.cur_y < state.rowoff) {
-		state.rowoff = state.cur_y;
-	}
-	if (state.cur_y >= state.rowoff + state.screenrows) {
-		state.rowoff = state.cur_y - state.screenrows + 1;
-	}
-	if (state.row_x < state.coloff) {
-		state.coloff = state.row_x;
-	}
-	if (state.cur_x >= state.coloff + state.screencols) {
-		state.coloff = state.row_x - state.screencols + 1;
-	}
-}
-
-void be_refreshScreen() {
-	editorScroll();
-
-	// Append a string builder on the stack so that it can be used to store all write-ops !!
-	StringBuilder sb;
-	sb_init(&sb);
-
-	// Clear Screen Calls :: Before drawing rows
-	sb_append(&sb, "\x1b[?25l");
-	sb_append(&sb, "\x1b[H");
-
-	// Draw Rows !!
-	int draw_wlcm = be_drawRows(&sb);
-	be_drawStatusBar(&sb);
-
-	if (draw_wlcm) {
-		// Move Cursor to the center and write something
-		// const char *msg = "|> HELLO FROM BE !!\r\n";
-		// be_drawWelcomeMsg(&sb, msg);
-		be_drawHomepage(&sb);
-	}
-
-	// Handle cursor movement
-	char buf[32];
-	snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
-			(state.cur_y - state.rowoff) + 1, (state.row_x - state.coloff) + 1);
-	sb_append(&sb, buf);
-
-	size_t res = write(STDOUT_FILENO, sb.data, sb.len);
-	be_check_and_raise(res == sb.len, "Could not clear screen", BE_ERR_RENDER);
-
-	sb_free(&sb);
+	state.mode = SPLASH;
 }
 
 
@@ -630,7 +590,27 @@ void be_processKeypress() {
 	int res;
 	int c = be_readKey();
 	BE_Row *row;
+
+	if (state.mode == SPLASH) {
+		switch(c) {
+			case '\r':
+				be_openBlankFile();
+				return;
+
+			case CTRL_KEY('q'):
+				res = write(STDOUT_FILENO, "\x1b[2J", 4);
+				res += write(STDOUT_FILENO, "\x1b[H", 3);
+				be_check_and_raise(res == 7, "Could not the clear screen", BE_ERR_RENDER);
+				exit(0);
+				break;
+		}
+		return;
+	}
+
 	switch (c) {
+		case '\r':
+			break;
+
 		case CTRL_KEY('q'):
 			res = write(STDOUT_FILENO, "\x1b[2J", 4);
 			res += write(STDOUT_FILENO, "\x1b[H", 3);
@@ -667,6 +647,11 @@ void be_processKeypress() {
 		    state.cur_y = state.numrows;
 		    break;
 
+		case BACKSPACE:
+		case CTRL_KEY('h'):
+		case DELETE:
+			break;
+
 		case PAGE_UP:
 		case PAGE_DOWN:
 			{
@@ -689,6 +674,15 @@ void be_processKeypress() {
 		case ARROW_RIGHT:
 			be_handleArrowKeys(c);
 			break;
+
+		case CTRL_KEY('l'):
+		case '\x1b':
+			break;
+
+		default:
+			be_editorInsertChar(c);
+			break;
+
 	}
 }
 
@@ -740,6 +734,7 @@ void be_openFile(const char *filename) {
 
 	FILE *fp = fopen(filename, "r");
 	if (!fp) be_die("Could not open file !!");
+	state.mode = EDIT;
 
 	char *line = NULL;
 	size_t linecap = 0;
@@ -753,6 +748,94 @@ void be_openFile(const char *filename) {
 
 	free(line);
 	fclose(fp);
+}
+
+void be_openBlankFile(void) {
+	be_appendRow("", 0);
+	state.filename = NULL;
+	state.cur_x = state.def_x;
+	state.cur_y = state.def_y;
+	state.dirty = false;
+	state.mode = EDIT;
+}
+
+/* Editor Ops */
+int be_calculateRx(BE_Row *row, int cx) {
+    int rx = 0;
+    for (int j = 0; j < cx; j++) {
+        if (row->data[j] == '\t')
+            rx += (DEFAULT_TAB_SIZE - 1) - (rx % DEFAULT_TAB_SIZE);
+        rx++;
+    }
+    return rx;
+}
+
+void editorScroll() {
+    if (state.cur_y < state.numrows) {
+      state.row_x = be_calculateRx(&state.row[state.cur_y], state.cur_x);
+    }
+
+    if (state.cur_y < state.rowoff) {
+		state.rowoff = state.cur_y;
+	}
+	if (state.cur_y >= state.rowoff + state.screenrows) {
+		state.rowoff = state.cur_y - state.screenrows + 1;
+	}
+	if (state.row_x < state.coloff) {
+		state.coloff = state.row_x;
+	}
+	if (state.cur_x >= state.coloff + state.screencols) {
+		state.coloff = state.row_x - state.screencols + 1;
+	}
+}
+
+void be_refreshScreen() {
+	editorScroll();
+
+	// Append a string builder on the stack so that it can be used to store all write-ops !!
+	StringBuilder sb;
+	sb_init(&sb);
+
+	// Clear Screen Calls :: Before drawing rows
+	sb_append(&sb, "\x1b[?25l");
+	sb_append(&sb, "\x1b[H");
+
+	// Draw Rows !!
+	int draw_wlcm = be_drawRows(&sb);
+	be_drawStatusBar(&sb);
+
+	if (draw_wlcm) {
+		// Move Cursor to the center and write something
+		be_drawHomepage(&sb);
+	}
+
+	// Handle cursor movement
+	char buf[32];
+	snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
+			(state.cur_y - state.rowoff) + 1, (state.row_x - state.coloff) + 1);
+	sb_append(&sb, buf);
+
+	size_t res = write(STDOUT_FILENO, sb.data, sb.len);
+	be_check_and_raise(res == sb.len, "Could not clear screen", BE_ERR_RENDER);
+
+	sb_free(&sb);
+}
+
+void be_rowInsertChar(BE_Row *row, int at, int c) {
+	if (at < 0 || at > row->size) at = row->size;
+	row->data = realloc(row->data, row->size + 2);
+	memmove(&row->data[at+1], &row->data[at], row->size - at + 1);
+	row->size++;
+	row->data[at] = c;
+	be_updateRow(row);
+}
+
+void be_editorInsertChar(int c) {
+	if (state.cur_y == state.numrows) {
+		be_appendRow("", 0);
+	}
+	be_rowInsertChar(&state.row[state.cur_y], state.cur_y, c);
+	state.cur_x++;
 }
 
 /* Initialization */
@@ -773,12 +856,12 @@ void be_initEditor() {
 
 	state.rowoff = 0;
 	state.coloff = 0;
+	state.dirty = false;
 
 	state.numrows = 0;
 	state.row = NULL;
 	state.filename = NULL;
 	atexit(be_freeEditor);
-
 
 	if (be_getWindowSize(&state.screenrows, &state.screencols) == -1) be_die("be_getWindowSize");
 	state.screenrows -= 1;
