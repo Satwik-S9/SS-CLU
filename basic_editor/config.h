@@ -1,5 +1,5 @@
-#define LIGHT_THEME_MODE
-// #define DARK_THEME_MODE
+// #define LIGHT_THEME_MODE
+#define DARK_THEME_MODE
 
 struct StatusBar_Theme {
 	char *sb_background;

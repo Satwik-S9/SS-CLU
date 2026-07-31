@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include <stdarg.h>
+#include <fcntl.h>
 
 #include "config.h"
 
@@ -52,6 +53,9 @@
 
 // Default Tab Size
 #define DEFAULT_TAB_SIZE 4
+
+// Gutter: "%5d" + "\u2502" + " " == 7 cells
+#define GUTTER_WIDTH 7
 
 // Load Statusbar theme
 static struct StatusBar_Theme sb_theme = { STATUS_BAR_BACKGROUND, STATUS_BAR_FOREGROUND};
@@ -164,8 +168,10 @@ static BE_State state;
 
 // Forward Declarations for some functions
 void be_die(const char *s);
-void be_openBlankFile(void);
+void be_openBlankFile();
 void be_editorInsertChar(int c);
+void be_saveFile();
+char *be_drawSaveDialog();
 
 /* String Builder */
 typedef struct {
@@ -266,6 +272,9 @@ void be_die(const char *s) {
 }
 
 void be_disableRawMode(void) {
+    /* Cursor visibility is terminal-global and outlives the process: if we
+     * exit while hidden, the user's shell inherits an invisible cursor. */
+    if (write(STDOUT_FILENO, "\x1b[?25h", 6) != 6) { /* best effort */ }
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &state.orig_termios) == -1)
         be_die("tcsetattr");
 }
@@ -387,7 +396,7 @@ int be_getCursorPos(int *rows, int *cols) {
 
 void be_moveCursor(StringBuilder *sb, int x, int y) {
         if (x >= state.screencols) x = state.screencols - 1;
-        if (y >= state.screenrows) y = state.screenrows - 1;
+        if (y >= state.screenrows) y = state.screenrows;
 
         char buf[32];
         snprintf(buf, sizeof(buf), "\x1b[%d;%dH", y + 1, x + 1);
@@ -455,9 +464,6 @@ int be_drawRows(StringBuilder *sb) {
 		sb_append(sb, "\r\n");
 	}
 
-	// Bring back cursor :: After drawing rows
-	sb_append(sb, "\x1b[H");
-	sb_append(sb, "\x1b[?25h");
 	return res;
 }
 
@@ -484,7 +490,7 @@ void be_drawStatusBar(StringBuilder *sb) {
 	// Prepare the left status
 	int len = snprintf(lstatus, sizeof(lstatus), "   ✽ | %.20s | [%d:%d|%d]",
 		state.filename ? state.filename : "[No Name]",
-		state.cur_y+1, state.cur_x - state.def_x + 1, state.numrows
+		state.cur_y+1, state.cur_x + 1, state.numrows
 	);
 	if (len > state.screencols) len = state.screencols;
 
@@ -543,31 +549,32 @@ void be_drawHomepage(StringBuilder *sb) {
 		}
 	}
 
-	// Move cursor back to start
-	be_moveCursor(sb, state.def_x, state.def_y);
-	state.mode = SPLASH;
 }
 
+char *be_drawSaveDialog() {
+	return "tmp.txt";
+}
 
 /* Input Processing */
 void be_handleArrowKeys(int key) {
+	int lastrow = state.numrows ? state.numrows - 1 : 0;
 	BE_Row *row = (state.cur_y >= state.numrows) ? NULL : &state.row[state.cur_y];
 
 	switch (key) {
 		case ARROW_LEFT:
-			if (state.cur_x != state.def_x) {
+			if (state.cur_x != 0) {
 				state.cur_x--;
 			} else if (state.cur_y > 0){
 				state.cur_y--;
-				state.cur_x = state.row[state.cur_y].size + state.def_x;
+				state.cur_x = state.row[state.cur_y].size;
 			}
 			break;
 		case ARROW_RIGHT:
-			if (row && state.cur_x < row->size + state.def_x) {
+			if (row && state.cur_x < row->size) {
 				state.cur_x++;
-			} else if (row && state.cur_x == row->size + state.def_x) {
+			} else if (row && state.cur_x == row->size && state.cur_y < lastrow) {
 				state.cur_y++;
-				state.cur_x = state.def_x;
+				state.cur_x = 0;
 			}
 			break;
 		case ARROW_UP:
@@ -580,8 +587,8 @@ void be_handleArrowKeys(int key) {
 
 	row = (state.cur_y >= state.numrows) ? NULL : &state.row[state.cur_y];
 	int rowlen = row ? row->size : 0;
-	if (state.cur_x > rowlen + state.def_x) {
-		state.cur_x = rowlen + state.def_x;
+	if (state.cur_x > rowlen) {
+		state.cur_x = rowlen;
 	}
 }
 
@@ -619,28 +626,31 @@ void be_processKeypress() {
 			break;
 
 		case CTRL_KEY('t'):
-            state.cur_x = state.def_x;
-            state.cur_y = state.def_y;
+            state.cur_x = 0;
+            state.cur_y = 0;
             break;
 
 		case CTRL_KEY('e'):
-            state.cur_y = state.numrows;
+			state.cur_y = state.numrows ? state.numrows - 1 : 0;
+            state.cur_x = state.numrows ? state.row[state.cur_y].size : 0;
             break;
 
+		case CTRL_KEY('s'):
+			be_saveFile();
+			break;
 
 		case HOME:
-			state.cur_x = state.def_x;
+			state.cur_x = 0;
+			state.cur_y = 0;
 			break;
 		case END:
-			row = (state.cur_y >= state.numrows) ? NULL : &state.row[state.cur_y];
-			int rowlen = row ? row->size : 0;
-			state.cur_x = rowlen + state.def_x;
-			// state.cur_x = state.screencols - 1;
+			state.cur_y = state.numrows ? state.numrows - 1 : 0;
+            state.cur_x = state.numrows ? state.row[state.cur_y].size : 0;
 			break;
 
 		// BUG: This is not working for me !!
 	    case CTRL_HOME:
-		    state.cur_x = state.def_x;
+		    state.cur_x = 0;
 			state.cur_y = state.def_y;
 		    break;
 		case CTRL_END:
@@ -655,11 +665,12 @@ void be_processKeypress() {
 		case PAGE_UP:
 		case PAGE_DOWN:
 			{
+				int lastrow = state.numrows ? state.numrows - 1 : 0;
 			    if (c == PAGE_UP) {
 					state.cur_y = state.rowoff;
 				} else if (c == PAGE_DOWN) {
 				    state.cur_y = state.rowoff + state.screenrows - 1;
-    				if (state.cur_y > state.numrows) state.cur_y = state.numrows;
+    				if (state.cur_y > state.numrows) state.cur_y = lastrow;
 			    }
 
 				int times = state.screenrows / 2;
@@ -750,13 +761,33 @@ void be_openFile(const char *filename) {
 	fclose(fp);
 }
 
-void be_openBlankFile(void) {
+void be_openBlankFile() {
 	be_appendRow("", 0);
 	state.filename = NULL;
-	state.cur_x = state.def_x;
+	state.cur_x = 0;
 	state.cur_y = state.def_y;
 	state.dirty = false;
 	state.mode = EDIT;
+}
+
+char *be_rowsToString(size_t *buflen) {
+	int totlen = 0;
+	int i;
+	for (i = 0; i < state.numrows; i++) {
+		totlen += state.row[i].size + 1;
+	}
+	*buflen = totlen;
+
+	char *buf = malloc(totlen);
+	char *p = buf;
+
+	for (i = 0; i < state.numrows; i++) {
+		memcpy(p, state.row[i].data, state.row[i].size);
+		p += state.row[i].size;
+		*p = '\n';
+		p++;
+	}
+	return buf;
 }
 
 /* Editor Ops */
@@ -784,7 +815,7 @@ void editorScroll() {
 	if (state.row_x < state.coloff) {
 		state.coloff = state.row_x;
 	}
-	if (state.cur_x >= state.coloff + state.screencols) {
+	if (state.row_x >= state.coloff + state.screencols - state.def_x) {
 		state.coloff = state.row_x - state.screencols + 1;
 	}
 }
@@ -801,19 +832,22 @@ void be_refreshScreen() {
 	sb_append(&sb, "\x1b[H");
 
 	// Draw Rows !!
-	int draw_wlcm = be_drawRows(&sb);
+	be_drawRows(&sb);
 	be_drawStatusBar(&sb);
 
-	if (draw_wlcm) {
-		// Move Cursor to the center and write something
+	if (state.mode == SPLASH) {
 		be_drawHomepage(&sb);
+		/* No text caret belongs on the splash. Leave it hidden, and park
+		 * it out of the way for terminals that ignore the hide request. */
+		be_moveCursor(&sb, 0, state.screenrows);
+	} else {
+		char buf[32];
+		snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
+				(state.cur_y - state.rowoff) + 1,
+				(state.row_x - state.coloff) + 1 + state.def_x);
+		sb_append(&sb, buf);
+		sb_append(&sb, "\x1b[?25h");
 	}
-
-	// Handle cursor movement
-	char buf[32];
-	snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
-			(state.cur_y - state.rowoff) + 1, (state.row_x - state.coloff) + 1);
-	sb_append(&sb, buf);
 
 	size_t res = write(STDOUT_FILENO, sb.data, sb.len);
 	be_check_and_raise(res == sb.len, "Could not clear screen", BE_ERR_RENDER);
@@ -834,21 +868,39 @@ void be_editorInsertChar(int c) {
 	if (state.cur_y == state.numrows) {
 		be_appendRow("", 0);
 	}
-	be_rowInsertChar(&state.row[state.cur_y], state.cur_y, c);
+	// be_moveCursor(sb, int x, int y)
+	be_rowInsertChar(&state.row[state.cur_y], state.cur_x, c);
 	state.cur_x++;
+}
+
+void be_saveFile() {
+	if (state.filename == NULL) {
+		state.filename = be_drawSaveDialog();
+	}
+
+	size_t len;
+	char *buf = be_rowsToString(&len);
+
+	int fd = open(state.filename, O_RDWR | O_CREAT, 0644);
+	int res = ftruncate(fd, len);
+	res = write(fd, buf, len);
+	close(fd);
+	free(buf);
 }
 
 /* Initialization */
 void be_freeEditor(void) {
-	for (int i = 0; i < state.numrows; i++)
+	for (int i = 0; i < state.numrows; i++) {
 		free(state.row[i].data);
+		free(state.row[i].render);
+	}
 	free(state.row);
 	state.row = NULL;
 	state.numrows = 0;
 }
 
 void be_initEditor() {
-	state.def_x = 0;
+	state.def_x = GUTTER_WIDTH;
 	state.def_y = 0;
 	state.cur_x = 0;
 	state.cur_y = 0;
@@ -861,6 +913,7 @@ void be_initEditor() {
 	state.numrows = 0;
 	state.row = NULL;
 	state.filename = NULL;
+	state.mode = SPLASH;
 	atexit(be_freeEditor);
 
 	if (be_getWindowSize(&state.screenrows, &state.screencols) == -1) be_die("be_getWindowSize");
@@ -876,12 +929,6 @@ int main(int argc, char **argv) {
 	if (argc >= 2) {
 		be_openFile(argv[1]);
 	}
-	if (state.numrows > 0) {
-		state.def_x = 7;
-		state.cur_x = state.def_x;
-		state.row_x = state.cur_x;
-	}
-
     while (1) {
 		be_refreshScreen();
 		be_processKeypress();
