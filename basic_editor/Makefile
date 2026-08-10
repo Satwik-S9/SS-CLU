@@ -1,7 +1,7 @@
 TARGET_DIR := ./build
 TARGET     := ${TARGET_DIR}/be
 
-.PHONY: all, clean
+.PHONY: all, clean, run
 
 all:
 	@mkdir -p ${TARGET_DIR}
@@ -9,3 +9,6 @@ all:
 
 clean:
 	@rm -rf ${TARGET_DIR}
+
+run:
+	${TARGET}

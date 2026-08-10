@@ -53,7 +53,8 @@
 #define MOD_CTRL  0x04
 
 // Default Tab Size
-#define DEFAULT_TAB_SIZE 4
+#define MAX_FILENAME_SIZE 256
+#define DEFAULT_TAB_SIZE  4
 
 // Gutter: "%5d" + "\u2502" + " " == 7 cells
 #define GUTTER_WIDTH 7
@@ -109,7 +110,6 @@ typedef enum {
 	EDIT
 } BE_Mode;
 
-
 typedef struct {
 	const char *style;
 	const char *text;
@@ -147,9 +147,20 @@ static const BE_HomepageLine homepage[] = {
 };
 
 
+typedef enum {
+	SD_FOCUS_INPUT,
+	SD_FOCUS_SAVE,
+	SD_FOCUS_QUIT,
+	SD_FOCUS_CANCEL,
+	SD_FOCUS_COUNT
+} BE_SaveDialogFocus;
+
 typedef struct {
-    bool active;
-    StringBuilder input_path;
+    bool   				active;
+	bool   				quit_on_save;
+	BE_SaveDialogFocus 	focus;
+    char   				input_path[MAX_FILENAME_SIZE + 1];
+	size_t 				inputlen;
 } BE_SaveDialog;
 
 typedef struct {
@@ -162,33 +173,35 @@ typedef struct {
 
 
 typedef struct {
-	int    	def_x, def_y;
-	int    	cur_x, cur_y;
-	int     row_x;
-	int    	rowoff;
-	int 	coloff;
-	int    	screenrows;
-	int    	screencols;
-	int    	numrows;
-	int	    dirty;
-    BE_SaveDialog save_diaglog;
-	BE_Row 	*row;
-	BE_Mode	mode;
-	char	*filename;
-	char	statusmsg[80];
-	time_t	statusmsg_time;
-	struct 	termios orig_termios;
+	int    			def_x, def_y;
+	int    			cur_x, cur_y;
+	int     		row_x;
+	int    			rowoff;
+	int 			coloff;
+	int    			screenrows;
+	int    			screencols;
+	int    			numrows;
+	int	    		dirty;
+    BE_SaveDialog 	save_diaglog;
+	BE_Row 			*row;
+	BE_Mode			mode;
+	char			*filename;
+	char			statusmsg[80];
+	time_t			statusmsg_time;
+	struct termios 	orig_termios;
 } BE_State;
 
 
 static BE_State state;
 
-// Forward Declarations for some functions
+// Forward Declarations for some functions: TODO: Move this to be.h
+void be_quitEditor(void);
+void be_quitNow(const char *message);
 void be_die(const char *s);
 void be_openBlankFile();
 void be_editorInsertChar(int c);
-void be_saveFile();
-char *be_drawSaveDialog(StringBuilder *sb);
+bool be_saveFile(size_t *out_len);
+char *be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y);
 void be_deleteChar();
 void be_insertNewLine();
 
@@ -224,15 +237,51 @@ void sb_free(StringBuilder *sb) {
         sb->len = sb->cap = 0;
 }
 
-/** Save Dialog Methods **/
-void be_saveDialog_init(BE_SaveDialog *sd) {
-    sb_init(&sd->input_path);
-    sd->active = false;
+/* Appends `n` raw bytes (need not be NUL-terminated, e.g. a slice of a
+ * render buffer) instead of a C string. */
+void sb_appendn(StringBuilder *sb, const char *str, size_t n) {
+        size_t needed = sb->len + n + 1;
+
+        if (needed > sb->cap) {
+                size_t new_cap = sb->cap ? sb->cap : 16;
+                while (new_cap < needed)
+                        new_cap *= 2;
+                char *new_data = realloc(sb->data, new_cap);
+                if (!new_data) { free(sb->data); be_die("realloc"); }
+                sb->data = new_data;
+                sb->cap = new_cap;
+        }
+
+        memcpy(sb->data + sb->len, str, n);
+        sb->len += n;
+        sb->data[sb->len] = '\0';
 }
 
-void be_saveDialog_free(BE_SaveDialog *sd) {
-    sb_free(&sd->input_path);
+/** Save Dialog Methods **/
+void be_saveDialog_open(BE_SaveDialog *sd) {
+    sd->active = true;
+	sd->focus = SD_FOCUS_INPUT;
+	sd->quit_on_save = false;
+
+	// Pre-fill the input bar with the current filename, if any, so
+	// re-saving an already-named file doesn't require retyping it.
+	if (state.filename != NULL) {
+		strncpy(sd->input_path, state.filename, MAX_FILENAME_SIZE);
+		sd->input_path[MAX_FILENAME_SIZE] = '\0';
+		sd->inputlen = strlen(sd->input_path);
+	} else {
+		sd->input_path[0] = '\0';
+		sd->inputlen = 0;
+	}
+}
+
+
+void be_saveDialog_close(BE_SaveDialog *sd) {
     sd->active = false;
+	sd->focus = SD_FOCUS_INPUT;
+	sd->inputlen = 0;
+	sd->input_path[0] = '\0';
+	sd->quit_on_save = false;
 }
 
 /* Helper funcitons */
@@ -250,11 +299,12 @@ int hex2int(char hex) {
 }
 
 void hex2rgb(int *r, int *g, int *b, char *hexcode) {
-	if (strlen(hexcode) != 7) {
+	if (strlen(hexcode) != 7 || hexcode[0] != '#') {
 		*r = -1; *g = -1; *b = -1;
+		return;
 	}
 
-	char *res = strchr(hexcode, '#') + 1;
+	char *res = hexcode + 1;
 	*r = (hex2int(res[0]) * 16) + hex2int(res[1]);
 	*g = (hex2int(res[2]) * 16) + hex2int(res[3]);
 	*b = (hex2int(res[4]) * 16) + hex2int(res[5]);
@@ -336,7 +386,7 @@ int be_readKey() {
 	char ch;
 	if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
 
- /* SS3 form: ESC O <final>. Never carries modifiers. */
+	/* SS3 form: ESC O <final>. Never carries modifiers. */
     if (ch == 'O') {
             if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
             switch (ch) {
@@ -458,7 +508,6 @@ static int line_width(const BE_HomepageLine *ln) {
 	return w;
 }
 
-
 int be_drawRows(StringBuilder *sb) {
 	int y, res = 1;
 	for (y = 0; y < state.screenrows; y++) {
@@ -472,16 +521,20 @@ int be_drawRows(StringBuilder *sb) {
 			// }
 		}
 		else {
-			// Determine line length
+			// Determine line length (bounded to the space left after the gutter)
+			int avail = state.screencols - state.def_x;
+			if (avail < 0) avail = 0;
 			int len = state.row[filerow].rsize - state.coloff;
 			if (len < 0) len = 0;
-			if (len > state.screencols) len = state.screencols;
+			if (len > avail) len = avail;
 			// Append line-no to the line
 			char linenum[64];
 			snprintf(linenum, sizeof(linenum), "%s%5d│ %s", "\x1b["S_DIM"m", filerow+1, "\x1b[0m");
 			sb_append(sb, linenum);
 
-			sb_append(sb, &state.row[filerow].render[state.coloff]);
+			if (len > 0) {
+				sb_appendn(sb, &state.row[filerow].render[state.coloff], (size_t)len);
+			}
 			res = 0;
 		}
 		sb_append(sb, "\x1b[K");
@@ -607,107 +660,120 @@ void be_drawHomepage(StringBuilder *sb) {
 
 }
 
-char *be_drawSaveDialog(StringBuilder *sb) {
+/* Save Dialog Drawing Helpers */
+/* An empty row: just the two side borders with the interior blanked. */
+static void be_drawDialogPadRow(StringBuilder *sb, int x, int y, int inner) {
+	be_moveCursor(sb, x, y);
+	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	for (int i = 0; i < inner; i++) sb_append(sb, " ");
+	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+}
+
+/* A row with a single left-aligned styled message, padded out to the
+ * right border. */
+static void be_drawDialogTextRow(StringBuilder *sb, int x, int y, int inner,
+                                  const char *style, const char *text) {
+	be_moveCursor(sb, x, y);
+	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	sb_append(sb, "\x1b[");
+	sb_append(sb, style);
+	sb_append(sb, "m");
+	sb_append(sb, text);
+	sb_append(sb, S_RESET);
+	for (int i = 0; i < inner - utf8_width(text); i++) sb_append(sb, " ");
+	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+}
+
+/* One button in the button bar: highlighted (reverse video) when it has
+ * focus, dim otherwise. Returns the number of cells it drew, so the
+ * caller can work out how much trailing padding is left. */
+static int be_drawDialogButton(StringBuilder *sb, const char *label, bool focused) {
+	sb_append(sb, "  ");
+	sb_append(sb, focused ? "\x1b[7;" S_ACCENT "m" : "\x1b[" S_DIM "m");
+	sb_append(sb, label);
+	sb_append(sb, S_RESET);
+	return 2 + utf8_width(label);
+}
+
+char *be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
     BE_SaveDialog *sd = &state.save_diaglog;
 
-    // Geometry 
+    /* Geometry */
     int width = state.screencols / 4;
     int height = 11;
     int x = (state.screencols - width) / 2;
     int y = (state.screenrows - height) / 2;
-
     int inner = width - 2;
 
-    // Top border
+    /* Top Border */
     be_moveCursor(sb, x, y);
-    sb_append(sb, "\x1b["S_DIM"m" B_TL);
+    sb_append(sb, "\x1b[" S_DIM "m" B_TL);
     sb_append(sb, B_H " *unsaved changes ");
     for (int i = 0; i < width - 21; i++) sb_append(sb, B_H);
     sb_append(sb, B_TR S_RESET);
 
-    // First Pad
-    be_moveCursor(sb, x, y + 1);
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    for (int i = 0; i < inner; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
+	/* First Pad */
+    be_drawDialogPadRow(sb, x, y + 1, inner);
 
-    // Info line #1
-    be_moveCursor(sb, x, y+2);
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    sb_append(sb, "\x1b["S_TEXT"m""  File has been modified." S_RESET);
-    for (int i = 0; i < inner - 25; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    // Info line#2
-    be_moveCursor(sb, x, y+3);
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    sb_append(sb, "\x1b["S_TEXT"m""  Save before quitting ?" S_RESET);
-    for (int i = 0; i < inner - 24; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    
-    // Second Pad
-    be_moveCursor(sb, x, y + 4);
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    for (int i = 0; i < inner; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
+	/* Save Dailog Message */
+	char buf[80];
+	const char *file_desc = (state.filename == NULL) ? "File" : state.filename;
+	snprintf(buf, sizeof(buf), "  %s has been modified.", file_desc);
 
-    // Save to dialog
-    be_moveCursor(sb, x, y+5);
-    sb_append(sb, "\x1b["S_DIM"m" B_V);
-    sb_append(sb, "\x1b["S_DIM"m" "  save to" S_RESET);
-    for (int i = 0; i < inner - 9; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
+    be_drawDialogTextRow(sb, x, y + 2, inner, S_TEXT, buf);
+    be_drawDialogTextRow(sb, x, y + 3, inner, S_TEXT, "  Save before quitting ?");
 
-    // Text Box
-    be_moveCursor(sb, x, y+6);
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    sb_append(sb, "\x1b["S_ACCENT"m""  [ " S_RESET);
-    sb_append(sb, "\x1b["S_TEXT"m""  ");
-    sb_append(sb, sd->input_path.data);
-    for (int i = 0; i < inner - 11 - (int)sd->input_path.len; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b["S_ACCENT"m""  ]  " S_RESET);
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
+	/* Second Pad */
+    be_drawDialogPadRow(sb, x, y + 4, inner);
 
-    // Third Pad
-    be_moveCursor(sb, x, y + 7);
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    for (int i = 0; i < inner; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
+	/* Text Box */
+    be_drawDialogTextRow(sb, x, y + 5, inner, S_DIM, "  save to");
 
-    // Buttons
-    be_moveCursor(sb, x, y+8);
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    
-    // Save Button
-    sb_append(sb, "\x1b["S_DIM"m""  [" S_RESET);
-    sb_append(sb, "\x1b["S_ACCENT"m"" (S)ave " S_RESET);
-    sb_append(sb, "\x1b["S_DIM"m""]  " S_RESET);
+    // Text Box: keep the caret close to the border so typing starts right
+    // where you're looking, instead of several cells in.
+    be_moveCursor(sb, x, y + 6);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+    sb_append(sb, "\x1b[" S_ACCENT "m" " [ " S_RESET);
+    sb_append(sb, "\x1b[" S_TEXT "m");
+    sb_append(sb, sd->input_path);
+    int box_used = 3 + (int)sd->inputlen; // " [ " + typed text
+    for (int i = 0; i < inner - box_used - 3; i++) sb_append(sb, " "); // leave room for " ] "
+    sb_append(sb, S_RESET "\x1b[" S_ACCENT "m" " ] " S_RESET);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
 
-    // Quit Button
-    sb_append(sb, "\x1b["S_DIM"m""  [" S_RESET);
-    sb_append(sb, "\x1b["S_ACCENT"m"" (Q)uit " S_RESET);
-    sb_append(sb, "\x1b["S_DIM"m""]  " S_RESET);
+	/* Third Pad */
+    be_drawDialogPadRow(sb, x, y + 7, inner);
 
-    // Cancel Button
-    sb_append(sb, "\x1b["S_DIM"m""  [" S_RESET);
-    sb_append(sb, "\x1b["S_ACCENT"m"" (C)ancel " S_RESET);
-    sb_append(sb, "\x1b["S_DIM"m""]  " S_RESET);
-    
-    for (int i = 0; i < inner - 38; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
+    // Buttons: exactly one of Save/Quit/Cancel is focused at a time (Tab
+    // or Left/Right cycles focus; Enter runs whichever is focused). Their
+    // hotkeys (s/q/c) still work no matter which button has focus.
+    be_moveCursor(sb, x, y + 8);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
 
-    // Last Pad
-    be_moveCursor(sb, x, y + 9);
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    for (int i = 0; i < inner; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b["S_DIM"m" B_V S_RESET);
-    
-    // Bottom border 
-    be_moveCursor(sb, x, y+10);
-    sb_append(sb, "\x1b["S_DIM"m" B_BL B_H);
-    const char *btm_msg = "tab switch · s: save | q: quit | c,esc: cancel";
+    const char *labels[3] = { " (S)ave ", " (Q)uit ", " (C)ancel " };
+    int used = 0;
+    for (int i = 0; i < 3; i++) {
+        bool focused = ((int)sd->focus == SD_FOCUS_SAVE + i);
+        used += be_drawDialogButton(sb, labels[i], focused);
+    }
+    for (int i = 0; i < inner - used; i++) sb_append(sb, " ");
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+
+	/* Last Pad */
+    be_drawDialogPadRow(sb, x, y + 9, inner);
+
+    /* Bottom border */
+    be_moveCursor(sb, x, y + 10);
+    sb_append(sb, "\x1b[" S_DIM "m" B_BL B_H);
+    const char *btm_msg = "tab/←→ switch · enter select · esc cancel";
     sb_append(sb, btm_msg);
     for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
     sb_append(sb, B_BR S_RESET);
+
+	// Land the caret right after the typed text inside the box: border(1)
+	// + " [ "(3) = 4 cells in, then past whatever's typed so far.
+	*cur_x = x + 4 + (int)sd->inputlen;
+	*cur_y = y + 6;
 
     return "temp.txt";
 }
@@ -750,8 +816,106 @@ void be_handleArrowKeys(int key) {
 }
 
 
+/* Commits whatever is in the input bar as the filename and saves. If the
+ * dialog was opened from Ctrl+Q, finishes by quitting instead of just
+ * closing the dialog — showing what got saved (or, on failure, why it
+ * didn't) rather than an unqualified "Quitting ...". */
+static void be_saveDialog_commit(void) {
+	BE_SaveDialog *sd = &state.save_diaglog;
+
+	if (state.filename != NULL) free(state.filename);
+	state.filename = strdup(sd->input_path);
+
+	size_t saved_len = 0;
+	bool ok = be_saveFile(&saved_len);
+
+	if (sd->quit_on_save) {
+		char msg[96];
+		if (ok) {
+			snprintf(msg, sizeof(msg), "%.20s saved to disk (%zu bytes). ✓ Quitting ...",
+			         state.filename, saved_len);
+		} else {
+			snprintf(msg, sizeof(msg), "%s", state.statusmsg); // be_saveFile's I/O error
+		}
+		be_quitNow(msg);
+		return;
+	}
+	be_saveDialog_close(sd);
+}
+
+void processSaveDialogKeypress(int c) {
+	BE_SaveDialog *sd = &state.save_diaglog;
+
+	switch (c) {
+		case '\x1b':
+			be_saveDialog_close(sd);
+			return;
+
+		// Tab always cycles focus forward: input -> Save -> Quit -> Cancel -> input.
+		case '\t':
+			sd->focus = (sd->focus + 1) % SD_FOCUS_COUNT;
+			return;
+
+		// Left/Right also walk the button bar, once a button has focus.
+		case ARROW_LEFT:
+		case ARROW_RIGHT:
+			if (sd->focus != SD_FOCUS_INPUT) {
+				int btn = sd->focus - SD_FOCUS_SAVE;
+				int dir = (c == ARROW_RIGHT) ? 1 : -1;
+				btn = (btn + dir + 3) % 3;
+				sd->focus = SD_FOCUS_SAVE + btn;
+			}
+			return;
+
+		case BACKSPACE:
+		case CTRL_KEY('h'):
+			if (sd->focus == SD_FOCUS_INPUT && sd->inputlen > 0) {
+				sd->input_path[--sd->inputlen] = '\0';
+			}
+			return;
+
+		// Enter performs whatever currently has focus: from the input bar
+		// that's Save (finish typing, then commit), from a button it's
+		// that button's action.
+		case '\r':
+			switch (sd->focus) {
+				case SD_FOCUS_INPUT:
+				case SD_FOCUS_SAVE:
+					be_saveDialog_commit();
+					return;
+				case SD_FOCUS_QUIT:
+					be_quitNow(NULL);
+					return;
+				case SD_FOCUS_CANCEL:
+				default:
+					be_saveDialog_close(sd);
+					return;
+			}
+	}
+
+	if (sd->focus == SD_FOCUS_INPUT) {
+		if (c >= 32 && c < 127 && sd->inputlen < MAX_FILENAME_SIZE) {
+			sd->input_path[sd->inputlen++] = (char)c;
+			sd->input_path[sd->inputlen] = '\0';
+		}
+		return;
+	}
+
+	// Direct hotkeys still work no matter which button currently has focus.
+	switch (c) {
+		case 'c':
+			be_saveDialog_close(sd);
+			return;
+		case 'q':
+			be_quitNow(NULL);
+			return;
+		case 's':
+			be_saveDialog_commit();
+			return;
+	}
+}
+
 void be_processKeypress() {
-	int res;
 	int c = be_readKey();
 
 	if (state.mode == SPLASH) {
@@ -761,12 +925,14 @@ void be_processKeypress() {
 				return;
 
 			case CTRL_KEY('q'):
-				res = write(STDOUT_FILENO, "\x1b[2J", 4);
-				res += write(STDOUT_FILENO, "\x1b[H", 3);
-				be_check_and_raise(res == 7, "Could not the clear screen", BE_ERR_RENDER);
-				exit(0);
+				be_quitEditor();
 				break;
 		}
+		return;
+	}
+
+	if (state.save_diaglog.active) {
+		processSaveDialogKeypress(c);
 		return;
 	}
 
@@ -776,10 +942,7 @@ void be_processKeypress() {
 			break;
 
 		case CTRL_KEY('q'):
-			res = write(STDOUT_FILENO, "\x1b[2J", 4);
-			res += write(STDOUT_FILENO, "\x1b[H", 3);
-			be_check_and_raise(res == 7, "Could not the clear screen", BE_ERR_RENDER);
-			exit(0);
+			be_quitEditor();
 			break;
 
 		case CTRL_KEY('t'):
@@ -793,29 +956,29 @@ void be_processKeypress() {
             break;
 
 		case CTRL_KEY('s'):
-			be_saveFile();
+			be_saveFile(NULL);
 			break;
 
-        case CTRL_KEY('o'):
-            state.save_diaglog.active = !state.save_diaglog.active;
+        case CTRL_KEY('w'):
+			be_saveDialog_open(&state.save_diaglog);
             return;
 
+		// HOME/END move within the current line; CTRL_HOME/CTRL_END jump
+		// to the start/end of the whole document.
 		case HOME:
 			state.cur_x = 0;
-			state.cur_y = 0;
 			break;
 		case END:
-			state.cur_y = state.numrows ? state.numrows - 1 : 0;
-            state.cur_x = state.numrows ? state.row[state.cur_y].size : 0;
+			if (state.cur_y < state.numrows) state.cur_x = state.row[state.cur_y].size;
 			break;
 
-		// BUG: This is not working for me !!
 	    case CTRL_HOME:
 		    state.cur_x = 0;
 			state.cur_y = state.def_y;
 		    break;
 		case CTRL_END:
-		    state.cur_y = state.numrows;
+			state.cur_y = state.numrows ? state.numrows - 1 : 0;
+			state.cur_x = state.numrows ? state.row[state.cur_y].size : 0;
 		    break;
 
 		case BACKSPACE:
@@ -869,6 +1032,7 @@ void be_updateRow(BE_Row *row) {
 
     if (row->render != NULL) free(row->render);
     row->render = malloc(row->size + tabs*(DEFAULT_TAB_SIZE - 1) + 1);
+    if (!row->render) be_die("malloc");
 
     int idx = 0;
     for (j = 0; j < row->size; j++) {
@@ -894,6 +1058,7 @@ void be_insertRow(int at, char *s, size_t len) {
 
 	state.row[at].size = len;
 	state.row[at].data = malloc(len+1);
+	if (!state.row[at].data) be_die("malloc");
 	memcpy(state.row[at].data, s, len);
 	state.row[at].data[len] = '\0';
 
@@ -930,6 +1095,7 @@ char *be_rowsToString(size_t *buflen) {
 	*buflen = totlen;
 
 	char *buf = malloc(totlen);
+	if (!buf) be_die("malloc");
 	char *p = buf;
 
 	for (i = 0; i < state.numrows; i++) {
@@ -956,7 +1122,9 @@ void be_deleteRow(int at) {
 }
 
 void be_rowAppendString(BE_Row *row, char *s, size_t len) {
-    row->data = realloc(row->data, row->size + len + 1);
+    char *new_data = realloc(row->data, row->size + len + 1);
+    if (!new_data) { free(row->data); be_die("realloc"); }
+    row->data = new_data;
     memcpy(&row->data[row->size], s, len);
     row->size += len;
     row->data[row->size] = '\0';
@@ -966,7 +1134,9 @@ void be_rowAppendString(BE_Row *row, char *s, size_t len) {
 
 void be_rowInsertChar(BE_Row *row, int at, int c) {
 	if (at < 0 || at > row->size) at = row->size;
-	row->data = realloc(row->data, row->size + 2);
+	char *new_data = realloc(row->data, row->size + 2);
+	if (!new_data) { free(row->data); be_die("realloc"); }
+	row->data = new_data;
 	memmove(&row->data[at+1], &row->data[at], row->size - at + 1);
 	row->size++;
 	row->data[at] = c;
@@ -1037,6 +1207,7 @@ void be_openFile(const char *filename) {
 
 void be_openBlankFile() {
 	be_insertRow(state.numrows, "", 0);
+	if (state.filename != NULL) free(state.filename);
 	state.filename = NULL;
 	state.cur_x = 0;
 	state.cur_y = state.def_y;
@@ -1045,32 +1216,44 @@ void be_openBlankFile() {
 }
 
 
-void be_saveFile() {
+// Returns whether the save succeeded, and (when it did) hands the byte
+// count back through `out_len` so callers that need to build their own
+// message — e.g. the quit-after-save flow — don't have to redo the I/O.
+bool be_saveFile(size_t *out_len) {
 	if (state.filename == NULL) {
-		state.filename = "temp.txt";
+		state.save_diaglog.active = true;
+		return false;
 	}
 
 	size_t len;
 	char *buf = be_rowsToString(&len);
+	bool ok = false;
+	int saved_errno = 0;
 
 	int fd = open(state.filename, O_RDWR | O_CREAT, 0644);
-    if (fd != -1) {
-        if (ftruncate(fd, len) != -1) {
-            if (write(fd, buf, len) == (ssize_t)len) {
-                close(fd);
-                free(buf);
-                state.dirty = 0;
-                // Set Status message :: Success
-                snprintf(state.statusmsg, sizeof(state.statusmsg), "🗉 Saved %ld bytes to file: %.20s", len, state.filename);
-                state.statusmsg_time = time(NULL);
-                return;
-            }
-        }
-    }
-    // Set Status message :: Failed
-    snprintf(state.statusmsg, sizeof(state.statusmsg), "[X] I/O Error Could not save file to disk : %s", strerror(errno));
-    state.statusmsg_time = time(NULL);
+	if (fd != -1) {
+		if (ftruncate(fd, len) != -1 && write(fd, buf, len) == (ssize_t)len) {
+			ok = true;
+		} else {
+			saved_errno = errno;
+		}
+		close(fd); // always close, whether or not the write succeeded
+	} else {
+		saved_errno = errno;
+	}
+
+	if (ok) {
+		state.dirty = 0;
+		// Set Status message :: Success
+		snprintf(state.statusmsg, sizeof(state.statusmsg), "✓  Saved %ld bytes to file: %.20s", len, state.filename);
+		if (out_len) *out_len = len;
+	} else {
+		// Set Status message :: Failed
+		snprintf(state.statusmsg, sizeof(state.statusmsg), "[X] I/O Error Could not save file to disk : %s", strerror(saved_errno));
+	}
+	state.statusmsg_time = time(NULL);
 	free(buf);
+	return ok;
 }
 
 
@@ -1121,10 +1304,8 @@ void be_refreshScreen() {
 
 	if (state.mode == SPLASH) {
 		be_drawHomepage(&sb);
-		/* No text caret belongs on the splash. Leave it hidden, and park
-		 * it out of the way for terminals that ignore the hide request. */
 		be_moveCursor(&sb, 0, state.screenrows);
-	} else {
+	} else if (!state.save_diaglog.active) {
 		char buf[32];
 		snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
 				(state.cur_y - state.rowoff) + 1,
@@ -1134,7 +1315,15 @@ void be_refreshScreen() {
 	}
 
     if (state.save_diaglog.active) {
-        be_drawSaveDialog(&sb);
+        int dlg_x, dlg_y;
+        be_drawSaveDialog(&sb, &dlg_x, &dlg_y);
+
+		if (state.save_diaglog.focus == SD_FOCUS_INPUT) {
+			char buf[32];
+			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", dlg_y + 1, dlg_x + 1);
+			sb_append(&sb, buf);
+			sb_append(&sb, "\x1b[?25h");
+		}
     }
 
 	size_t res = write(STDOUT_FILENO, sb.data, sb.len);
@@ -1144,7 +1333,7 @@ void be_refreshScreen() {
 }
 
 
-/* Initialization */
+/* Initialization && Closing */
 void be_freeEditor(void) {
 	for (int i = 0; i < state.numrows; i++) {
 		free(state.row[i].data);
@@ -1154,13 +1343,13 @@ void be_freeEditor(void) {
 	state.row = NULL;
 	state.numrows = 0;
 
-    be_saveDialog_free(&state.save_diaglog);
-
 	free(state.filename);
 	state.filename = NULL;
+
+	state.dirty = 0;
 }
 
-void be_initEditor() {
+void be_initEditor(void) {
 	state.def_x = GUTTER_WIDTH;
 	state.def_y = 0;
 	state.cur_x = 0;
@@ -1176,16 +1365,41 @@ void be_initEditor() {
 	state.filename = NULL;
 	state.mode = SPLASH;
 
-    be_saveDialog_init(&state.save_diaglog);
-
 	atexit(be_freeEditor);
 
 	if (be_getWindowSize(&state.screenrows, &state.screencols) == -1) be_die("be_getWindowSize");
 	state.screenrows -= 1;
 }
 
-/* Main Loop */
+void be_quitNow(const char *message) {
+	// Get the dialog out of the way so the message is what's visible.
+	state.save_diaglog.active = false;
 
+	snprintf(state.statusmsg, sizeof(state.statusmsg), "%s", message ? message : "Quitting ...");
+	state.statusmsg_time = time(NULL);
+	be_refreshScreen();
+
+	sleep(1);
+
+	int res = write(STDOUT_FILENO, "\x1b[2J", 4);
+	res += write(STDOUT_FILENO, "\x1b[H", 3);
+	be_check_and_raise(res == 7, "Could not the clear screen", BE_ERR_RENDER);
+
+	be_freeEditor();
+	exit(0);
+}
+
+void be_quitEditor(void) {
+	if (state.dirty != 0) {
+		be_saveDialog_open(&state.save_diaglog);
+		state.save_diaglog.quit_on_save = true;
+		return;
+	}
+
+	be_quitNow(NULL);
+}
+
+/* Main Loop */
 int main(int argc, char **argv) {
     be_enableRawMode();
 	be_initEditor();

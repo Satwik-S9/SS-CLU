@@ -5,11 +5,11 @@
 - [x] Enable cursor moving and basic text editing in the editor
 - [x] Full word processing based navigation. CTRL+HOME, CTRL+END, PAGEUP, PAGEDOWN, HOME, END should be handled
 - [x] Convert the current text viewer to a text editor
+- [x] Floating window confirmation for quitting without saving the changes
+- [x] Enable the status-message functionality.
 - [ ] Port all configuration to config.h file
 - [ ] Unify some interfaces
-- [ ] Floating window confirmation for quitting without saving the changes
 - [ ] Make command pallete and also have a switch theme functionality for it 
-- [x] Enable the status-message functionality.
 - [ ] Enable readline like editing in the editor | i.e. use a line struct
 
 
