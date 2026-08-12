@@ -1,5 +1,6 @@
 /* Includes */
-
+#include <limits.h>
+#include <ctype.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,6 +9,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <stdbool.h>
 #include <time.h>
 #include <stdarg.h>
@@ -20,6 +22,14 @@
 #define _BSD_SOURCE
 #define _GNU_SOURCE
 
+#ifndef NAME_MAX
+	#define NAME_MAX 255
+#endif
+
+#ifndef PATH_MAX
+	#define PATH_MAX 4096
+#endif
+
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define BASIC_EDITOR_VERSION "1.0.0"
 
@@ -29,6 +39,8 @@
 #define B_TR  "╮"   /* top-right (rounded)     */
 #define B_BL  "╰"   /* bot-left  (rounded)     */
 #define B_BR  "╯"   /* bot-right (rounded)     */
+#define B_LT "├"
+#define B_RT "┤"
 
 #define MAX_SPANS 6
 
@@ -47,13 +59,31 @@
 #define S_ACCENT "38;2;133;153;0"
 #define S_RESET  "\x1b[0m"
 
+/** Palette Highlights **/
+#ifdef LIGHT_THEME_MODE
+	#define PAL_DIM    "\x1b[38;2;190;190;190m" /* faint border/hint grey, barely off-white     */
+	#define PAL_TEXT   "\x1b[38;2;110;110;110m" /* regular command-name grey, readable on white */
+	#define PAL_BOLD   "\x1b[1;38;2;20;20;20m"  /* near-black bold, for what you've typed       */
+	#define PAL_SEL    "\x1b[48;2;225;225;225m" /* soft grey row highlight (matches STATUS_BAR_BACKGROUND) */
+#endif
+
+#ifdef DARK_THEME_MODE
+	#define PAL_DIM    "\x1b[38;5;240m"
+	#define PAL_TEXT   "\x1b[38;5;250m"
+	#define PAL_BOLD   "\x1b[1;38;5;253m"
+	#define PAL_SEL    "\x1b[48;5;236m"
+#endif
+
+#define PAL_RESET  "\x1b[0m"
+#define PAL_ACCENT "\x1b[38;2;133;153;0m"
+
 // Mod Keys !!
 #define MOD_SHIFT 0x01
 #define MOD_ALT   0x02
 #define MOD_CTRL  0x04
 
 // Default Tab Size
-#define MAX_FILENAME_SIZE 256
+#define MAX_INPUT_SIZE 	  256
 #define DEFAULT_TAB_SIZE  4
 
 // Gutter: "%5d" + "\u2502" + " " == 7 cells
@@ -83,9 +113,9 @@ typedef enum {
 
 
 typedef enum {
-	// Editing Keys
-	BACKSPACE = 127,
-    // Nav Keys
+	// Keys present in ASCII
+	BACKSPACE = 0x7f,
+    // Other Keys
     ARROW_LEFT  = 1000,
 	ARROW_RIGHT,
 	ARROW_DOWN,
@@ -97,6 +127,17 @@ typedef enum {
 	CTRL_HOME,
 	CTRL_END,
 	DELETE,
+	WORD_DELETE,
+	WORD_RIGHT,
+	WORD_LEFT,
+	// NOTE: CTRL_BACKSPACE must NOT be 0x08 — that value is the literal
+	// ASCII byte for Ctrl+H, which the raw single-byte read path already
+	// returns directly (and the keypress switch already treats as plain
+	// Backspace). Giving CTRL_BACKSPACE the same value made it dead: it
+	// could never appear as its own case without colliding with CTRL_KEY('h').
+	CTRL_BACKSPACE,
+
+	CTRL_SHIFT_S,
 } BE_Key;
 
 
@@ -146,7 +187,7 @@ static const BE_HomepageLine homepage[] = {
 	   {S_DIM," for commands"}},                                        5, AL_CENTER },
 };
 
-
+/* Save Dialog Structures */
 typedef enum {
 	SD_FOCUS_INPUT,
 	SD_FOCUS_SAVE,
@@ -159,9 +200,39 @@ typedef struct {
     bool   				active;
 	bool   				quit_on_save;
 	BE_SaveDialogFocus 	focus;
-    char   				input_path[MAX_FILENAME_SIZE + 1];
+    char   				input_path[MAX_INPUT_SIZE + 1];
 	size_t 				inputlen;
 } BE_SaveDialog;
+
+/* Open Dialog Box Structures */
+typedef enum {
+	OD_FOCUS_INPUT,
+	OD_FOCUS_OPEN,
+	OD_FOCUS_CANCEL,
+	OD_FOCUS_COUNT,
+} BE_OpenDialogFocus;
+
+typedef struct {
+	bool 				active;
+	bool 				create_file;
+	BE_OpenDialogFocus 	focus;
+	char 				input_path[MAX_INPUT_SIZE + 1];
+	size_t				inputlen;
+} BE_OpenDialog;
+
+typedef enum {
+	GD_FOCUS_INPUT,
+	GD_FOCUS_GOTO,
+	GD_FOCUS_CANCEL,
+	GD_FOCUS_COUNT,
+} BE_GotoDialogFocus;
+
+typedef struct {
+	BE_GotoDialogFocus focus;
+	bool active;
+	int  inputlen;
+	char input[32];
+} BE_GotoDialog;
 
 typedef struct {
 	// int cx, cy;
@@ -171,6 +242,49 @@ typedef struct {
 	char *render;
 } BE_Row;
 
+typedef enum {
+	CMD_SAVE = 0,
+	CMD_SAVEAS,
+	CMD_OPEN,
+	CMD_QUIT,
+	CMD_GOTO,
+	CMD_GTST,
+	CMD_GTEN,
+	CMD_FIND,
+	CMD_REPLACE,
+	CMD_SHOWKEY
+} PaletteCmdType;
+
+typedef struct {
+	PaletteCmdType	cmd_type; 
+	const char 		*name;
+	const char 		*hint;
+} BE_Command;
+
+static const BE_Command commands[] = {
+	{ CMD_SAVE, 	"save file",			"^S" },
+	{ CMD_SAVEAS, 	"write file as",		"^W" },
+	{ CMD_OPEN, 	"open file",			"^O" },
+	{ CMD_QUIT, 	"quit", 				"^Q" },
+	{ CMD_GOTO, 	"go to line", 			"^G" },
+	{ CMD_GTST, 	"go to start of file",	"^Home" },
+	{ CMD_GTEN, 	"go to end of file",    "^End" },
+	{ CMD_FIND, 		"find in file", 		"^F" },
+	{ CMD_REPLACE, 	"find and replace",     "^R" },
+	{ CMD_SHOWKEY,	"show keymaps",         "^." },
+};
+
+#define NCOMMANDS ((int)(sizeof(commands) / sizeof(commands[0])))
+
+typedef struct {
+	bool open;
+	char query[MAX_INPUT_SIZE + 1];
+	int  qlen;
+	int  max_rows;
+	int  sel;
+	int  nfiltered;
+	int  filtered[NCOMMANDS];
+} BE_CmdPalette;
 
 typedef struct {
 	int    			def_x, def_y;
@@ -182,9 +296,12 @@ typedef struct {
 	int    			screencols;
 	int    			numrows;
 	int	    		dirty;
-    BE_SaveDialog 	save_diaglog;
-	BE_Row 			*row;
 	BE_Mode			mode;
+	BE_GotoDialog   goto_dialog;
+	BE_OpenDialog	open_dialog;
+    BE_SaveDialog 	save_dialog;
+	BE_CmdPalette   pal;
+	BE_Row 			*row;
 	char			*filename;
 	char			statusmsg[80];
 	time_t			statusmsg_time;
@@ -201,9 +318,17 @@ void be_die(const char *s);
 void be_openBlankFile();
 void be_editorInsertChar(int c);
 bool be_saveFile(size_t *out_len);
-char *be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y);
+void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y);
 void be_deleteChar();
 void be_insertNewLine();
+bool validFilename(const char *filename);
+bool checkFileExists(const char *filepath);
+int isDir(const char *filename);
+void be_setStatusMsg(const char *msg);
+void be_openBlankFile();
+void be_openFile(const char *filename);
+void be_clearRows(void);
+void be_updateRow(BE_Row *row);
 
 /** String Builder Methods **/
 void sb_init(StringBuilder *sb) {
@@ -257,8 +382,17 @@ void sb_appendn(StringBuilder *sb, const char *str, size_t n) {
         sb->data[sb->len] = '\0';
 }
 
+void sb_repeat(StringBuilder *sb, const char *s, int n) {
+	for (int i=0; i<n; i++) sb_append(sb, s);
+}
+
 /** Save Dialog Methods **/
 void be_saveDialog_open(BE_SaveDialog *sd) {
+	if (state.mode == SPLASH) {
+		sd->active = false;
+		return;
+	}
+
     sd->active = true;
 	sd->focus = SD_FOCUS_INPUT;
 	sd->quit_on_save = false;
@@ -266,8 +400,8 @@ void be_saveDialog_open(BE_SaveDialog *sd) {
 	// Pre-fill the input bar with the current filename, if any, so
 	// re-saving an already-named file doesn't require retyping it.
 	if (state.filename != NULL) {
-		strncpy(sd->input_path, state.filename, MAX_FILENAME_SIZE);
-		sd->input_path[MAX_FILENAME_SIZE] = '\0';
+		strncpy(sd->input_path, state.filename, MAX_INPUT_SIZE);
+		sd->input_path[MAX_INPUT_SIZE] = '\0';
 		sd->inputlen = strlen(sd->input_path);
 	} else {
 		sd->input_path[0] = '\0';
@@ -282,6 +416,249 @@ void be_saveDialog_close(BE_SaveDialog *sd) {
 	sd->inputlen = 0;
 	sd->input_path[0] = '\0';
 	sd->quit_on_save = false;
+}
+
+/* Open Dialog Methods */
+void be_openDialog_open(BE_OpenDialog *od) {
+	// If unsaved changes are present first prompt user to save
+	if (state.dirty != 0) {
+		be_saveDialog_open(&state.save_dialog);
+		be_setStatusMsg("Please save the file first");
+		return;
+	}
+	
+	od->active = true;
+	od->focus = OD_FOCUS_INPUT;
+	od->inputlen = 0;
+	od->input_path[0] = '\0';
+}
+
+void be_openDialog_close(BE_OpenDialog *od) {
+	od->active = false;
+	od->focus = OD_FOCUS_INPUT;
+	od->inputlen = 0;
+	od->input_path[0] = '\0';
+}
+
+void be_openDialog_commit() {
+	BE_OpenDialog *od = &state.open_dialog;
+
+	// Snapshot the path before closing: be_openDialog_close() wipes
+	// od->input_path, so the read has to happen first.
+	char filepath[MAX_INPUT_SIZE + 1];
+	strncpy(filepath, od->input_path, MAX_INPUT_SIZE);
+	filepath[MAX_INPUT_SIZE] = '\0';
+
+	be_openDialog_close(od);
+
+	if (!validFilename(filepath)) { be_setStatusMsg("{X} Invalid filename provided"); return; }
+
+	int is_dir_res = isDir(filepath);
+	if (is_dir_res == -1) { be_setStatusMsg("{X} Invalid filename provided"); return; }
+	if (is_dir_res == -2) { be_setStatusMsg("{X} Error occured while opening"); return; }
+	if (is_dir_res == 1)  { be_setStatusMsg("{X} Provided path is a directory"); return; }
+
+	if (checkFileExists(filepath)) {
+		be_openFile(filepath);
+	} else {
+		be_openBlankFile();
+		state.filename = strdup(filepath);
+	}
+}
+
+/* Goto Dialog Methods */
+void be_gotoDialog_open(BE_GotoDialog *gd) {
+	gd->active = true;
+	gd->inputlen = 0;
+	gd->input[0] = '\0';
+	gd->focus = GD_FOCUS_INPUT;
+}
+
+void be_gotoDialog_close(BE_GotoDialog *gd) {
+	gd->active = false;
+	gd->inputlen = 0;
+	gd->input[0] = '\0';
+	gd->focus = GD_FOCUS_INPUT;
+}
+
+void be_gotoDialog_commit(BE_GotoDialog *gd) {
+	if (gd->input[0] =='\0') {
+		be_setStatusMsg("{X} No line no. provided");
+		return;
+	}
+
+	char *endptr;
+	errno = 0;
+
+	long value = strtol(gd->input, &endptr, 10); // base 10
+
+	if (endptr == gd->input) {
+		be_setStatusMsg("{X} No line no. provided");
+	} else if (errno == ERANGE) {
+    	be_setStatusMsg("{X} Out of range ... Overflow|Underflow");
+	} else if (*endptr != '\0') {
+		be_setStatusMsg("{X} Invalid number !!");
+	}
+
+	int result = (int)value;
+	be_gotoDialog_close(gd);
+
+	if (result < 0) be_setStatusMsg("{X} Really ??");
+	if (result >= state.numrows) {
+		be_setStatusMsg("{X} Error line number is more than number of rows in the file");
+	}
+
+	state.cur_y = result-1;
+	state.cur_x = 0;
+}
+
+/* Cmd Palette Methods */
+static bool fuzzy_match(const char *hay, const char *needle) {
+	if (!needle || *needle == '\0') return true;
+	while (*hay) {
+		if (tolower((unsigned char)*hay) == tolower((unsigned char)*needle)) {
+			needle++;
+			if (*needle == '\0') return true; // matched the whole needle as a subsequence
+		}
+		hay++;
+	}
+	return false;
+}
+
+static void be_paletteRefilter() {
+	BE_CmdPalette *p = &state.pal;
+	p->nfiltered = 0;
+	for (int i = 0; i < NCOMMANDS; i++) {
+		if (fuzzy_match(commands[i].name, p->query))
+			p->filtered[p->nfiltered++] = i;
+	}
+	if (p->sel >= p->nfiltered) p->sel = p->nfiltered - 1;
+	if (p->sel < 0) p->sel = 0;
+}
+
+static void be_paletteOpen(void) {
+	BE_CmdPalette *p = &state.pal;
+	p->open = true;
+	p->qlen = 0;
+	p->query[0] = '\0';
+	p->sel = 0;
+	be_paletteRefilter();
+}
+
+static void be_paletteClose() {
+	state.pal.open = false;
+}
+
+static void be_paletteExecuteCmd(void) {
+	BE_CmdPalette *p = &state.pal;
+
+	if (p->sel >= NCOMMANDS || p->sel < 0) return;
+	BE_Command cmd = commands[p->sel];
+	size_t outlen;
+	bool ok;
+	char msg[80];
+	switch (cmd.cmd_type) {
+		case CMD_SAVE:
+			be_paletteClose();
+			ok = be_saveFile(&outlen);
+			// Do not save when on homepage
+			if (state.mode == SPLASH) {
+				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
+				state.statusmsg_time = time(NULL);
+				return;
+			}
+			if (ok) {
+				snprintf(msg, sizeof(msg), "%.20s saved to disk (%zu bytes).",
+						 state.filename, outlen);
+			} else {
+				snprintf(msg, sizeof(msg), "I/O Error. Could not save file to disk");
+			}
+
+			snprintf(state.statusmsg, sizeof(state.statusmsg), "%s", msg);
+			state.statusmsg_time = time(NULL);
+			return;
+
+		case CMD_SAVEAS:
+			be_paletteClose();
+			// Do not save when on homepage
+			if (state.mode == SPLASH) {
+				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
+				state.statusmsg_time = time(NULL);
+				return;
+			}
+			be_saveDialog_open(&state.save_dialog);
+			return;
+
+		case CMD_OPEN:
+			be_paletteClose();
+			// Open File Dialog;
+			return;
+		
+		case CMD_QUIT:
+			be_paletteClose();
+			be_quitNow("Quitting ...");
+			break;
+		
+		case CMD_GOTO:
+			be_paletteClose();
+			// Do not execute when on homepage
+			if (state.mode == SPLASH) {
+				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
+				state.statusmsg_time = time(NULL);
+				return;
+			}
+
+			// Goto line dialog
+			return;
+		
+		case CMD_GTST:
+			be_paletteClose();
+			// Do not execute when on homepage
+			if (state.mode == SPLASH) {
+				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
+				state.statusmsg_time = time(NULL);
+				return;
+			}
+			// Handle like CTRL_HOME;
+			return;
+		
+		case CMD_GTEN:
+			be_paletteClose();
+			// Do not execute when on homepage
+			if (state.mode == SPLASH) {
+				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
+				state.statusmsg_time = time(NULL);
+				return;
+			}
+			// Handle like CTRL_END;
+			return;
+
+		case CMD_FIND:
+			be_paletteClose();
+			// Do not execute when on homepage
+			if (state.mode == SPLASH) {
+				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
+				state.statusmsg_time = time(NULL);
+				return;
+			}
+			// Handle Finding
+			return;
+
+		case CMD_REPLACE:
+			be_paletteClose();
+			// Do not execute when on homepage
+			if (state.mode == SPLASH) {
+				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
+				state.statusmsg_time = time(NULL);
+				return;
+			}
+			// Handle Finding & Replacing
+			return;
+		case CMD_SHOWKEY:
+			be_paletteClose();
+			// Draw Cheatsheet
+			return;
+	}
 }
 
 /* Helper funcitons */
@@ -346,6 +723,11 @@ void be_die(const char *s) {
 }
 
 void be_disableRawMode(void) {
+    /* Pop the keyboard protocol enhancement pushed in be_enableRawMode():
+     * leaving it on would change how keys are reported for whatever the
+     * user's shell runs next. Terminals that never understood the push
+     * ignore the pop the same harmless way. */
+    if (write(STDOUT_FILENO, "\x1b[<u", 4) != 4) { /* best effort */ }
     /* Cursor visibility is terminal-global and outlives the process: if we
      * exit while hidden, the user's shell inherits an invisible cursor. */
     if (write(STDOUT_FILENO, "\x1b[?25h", 6) != 6) { /* best effort */ }
@@ -370,6 +752,14 @@ void be_enableRawMode(void) {
     raw.c_cc[VTIME] = 1;
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) be_die("tcsetattr");
+
+    /* Push the Kitty keyboard protocol's "disambiguate escape codes" flag
+     * (bit 1). Without it, Ctrl+Shift+S is the exact same byte as Ctrl+S on
+     * the wire — there's no way to tell them apart. Terminals that support
+     * the protocol start reporting Ctrl+Shift+<letter> (and a few other
+     * otherwise-ambiguous keys) as distinct CSI sequences; terminals that
+     * don't recognize this escape simply ignore it and nothing changes. */
+    if (write(STDOUT_FILENO, "\x1b[>1u", 5) != 5) { /* best effort */ }
 }
 
 int be_readKey() {
@@ -400,7 +790,21 @@ int be_readKey() {
             return '\x1b';
     }
 
-    if (ch != '[') return '\x1b';
+    /* Bare "ESC <byte>" form: Meta/Alt-modified keys. Terminals encode
+     * Alt+<key> this way by default (no CSI wrapper) rather than as a
+     * modifier bit inside a CSI sequence — that's why Alt+b / Alt+f never
+     * matched anything below. Ctrl+Backspace is indistinguishable from
+     * Alt+Backspace at the protocol level too: both arrive as ESC
+     * followed by DEL (0x7f), so both are handled here. */
+    if (ch != '[') {
+        switch (ch) {
+            case 'b': return WORD_LEFT;
+            case 'f': return WORD_RIGHT;
+            case 0x7f:
+            case 0x08: return CTRL_BACKSPACE;
+        }
+        return '\x1b';
+    }
 
     /* CSI form: collect params until a final byte (0x40-0x7E). */
     char seq[24];
@@ -425,16 +829,16 @@ int be_readKey() {
     switch (final) {
         case 'H': return (mods & MOD_CTRL) ? CTRL_HOME : HOME;
         case 'F': return (mods & MOD_CTRL) ? CTRL_END : END;
-        case 'A': return ARROW_UP;
+		case 'A': return ARROW_UP;
         case 'B': return ARROW_DOWN;
-        case 'C': return ARROW_RIGHT;
-        case 'D': return ARROW_LEFT;
+		case 'C': return (mods & MOD_CTRL) ? WORD_RIGHT : ARROW_RIGHT;
+		case 'D': return (mods & MOD_CTRL) ? WORD_LEFT : ARROW_LEFT;
 
         case '~':
             switch (p1) {
                 case 1: case 7: return (mods & MOD_CTRL) ? CTRL_HOME : HOME;
                 case 4: case 8: return (mods & MOD_CTRL) ? CTRL_END : END;
-                case 3: return DELETE;
+				case 3: return (mods & MOD_CTRL) ? WORD_DELETE : DELETE;
                 case 5: return PAGE_UP;
                 case 6: return PAGE_DOWN;
             }
@@ -446,6 +850,35 @@ int be_readKey() {
                 case 8: return CTRL_END;
             }
             break;
+
+		// Kitty keyboard protocol ("disambiguate escape codes"), which
+		// be_enableRawMode() opts into: "CSI <codepoint> ; <mods> u". Once a
+		// terminal supports it, this isn't just how Ctrl+Shift+S shows up —
+		// Esc/Enter/Tab/Backspace and *every* Ctrl-modified key switch to
+		// this form too, since that's what makes Ctrl+Shift+<letter>
+		// representable at all (on an unmodified terminal it's the exact
+		// same byte as plain Ctrl+<letter>). So this has to reconstruct
+		// every one of those, not just special-case the one combo it was
+		// added for — otherwise every existing Ctrl+ binding breaks on
+		// terminals that do support the protocol. Terminals that don't
+		// support it never send 'u' sequences, so none of this ever runs
+		// for them and nothing changes.
+		case 'u':
+			if (p1 == 27)  return '\x1b';
+			if (p1 == 13)  return '\r';
+			if (p1 == 9)   return '\t';
+			if (p1 == 127) return (mods & (MOD_CTRL | MOD_ALT)) ? CTRL_BACKSPACE : BACKSPACE;
+
+			if ((p1 == 's' || p1 == 'S') && (mods & MOD_CTRL) && (mods & MOD_SHIFT))
+				return CTRL_SHIFT_S;
+
+			// Plain Ctrl+<letter> (no Shift): collapse back to the legacy
+			// control byte CTRL_KEY() produces, so every other Ctrl+
+			// binding in the app keeps working unchanged.
+			if ((mods & MOD_CTRL) && !(mods & MOD_SHIFT) &&
+			    ((p1 >= 'a' && p1 <= 'z') || (p1 >= 'A' && p1 <= 'Z')))
+				return CTRL_KEY(p1);
+			break;
     }
     return '\x1b';
 }
@@ -516,9 +949,6 @@ int be_drawRows(StringBuilder *sb) {
 			if (y < state.screenrows - 1) {
 				sb_append(sb, "~");
 			}
-			// else {
-			// 	sb_append(sb, "Made with ♡ by srivsatava.s");
-			// }
 		}
 		else {
 			// Determine line length (bounded to the space left after the gutter)
@@ -695,12 +1125,12 @@ static int be_drawDialogButton(StringBuilder *sb, const char *label, bool focuse
 	return 2 + utf8_width(label);
 }
 
-char *be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
-    BE_SaveDialog *sd = &state.save_diaglog;
+void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
+    BE_SaveDialog *sd = &state.save_dialog;
 
     /* Geometry */
     int width = state.screencols / 4;
-    int height = 11;
+    int height = 10;
     int x = (state.screencols - width) / 2;
     int y = (state.screenrows - height) / 2;
     int inner = width - 2;
@@ -774,9 +1204,340 @@ char *be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 	// + " [ "(3) = 4 cells in, then past whatever's typed so far.
 	*cur_x = x + 4 + (int)sd->inputlen;
 	*cur_y = y + 6;
-
-    return "temp.txt";
 }
+
+void be_drawOpenDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
+	BE_OpenDialog *od = &state.open_dialog;
+
+    /* Geometry */
+    int width = state.screencols / 4;
+    int height = 10;
+    int x = (state.screencols - width) / 2;
+    int y = (state.screenrows - height) / 2;
+    int inner = width - 2;
+
+    /* Top Border */
+    be_moveCursor(sb, x, y);
+    sb_append(sb, "\x1b[" S_DIM "m" B_TL);
+    sb_append(sb, B_H " Open File ");
+    for (int i = 0; i < width - 14; i++) sb_append(sb, B_H);
+    sb_append(sb, B_TR S_RESET);
+
+	/* First Pad */
+    be_drawDialogPadRow(sb, x, y + 1, inner);
+
+	/* Open Dailog Message */
+	char buf[80];
+	snprintf(buf, sizeof(buf), "  Open a file:");
+    be_drawDialogTextRow(sb, x, y + 2, inner, S_TEXT, buf);
+
+	/* Second Pad */
+    be_drawDialogPadRow(sb, x, y + 3, inner);
+
+	/* Text Box */
+    be_drawDialogTextRow(sb, x, y + 4, inner, S_DIM, "  open file:");
+
+    be_moveCursor(sb, x, y + 5);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+    sb_append(sb, "\x1b[" S_ACCENT "m" " [ " S_RESET);
+    sb_append(sb, "\x1b[" S_TEXT "m");
+    sb_append(sb, od->input_path);
+    int box_used = 3 + (int)od->inputlen;
+    for (int i = 0; i < inner - box_used - 3; i++) sb_append(sb, " ");
+    sb_append(sb, S_RESET "\x1b[" S_ACCENT "m" " ] " S_RESET);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+
+	/* Third Pad */
+    be_drawDialogPadRow(sb, x, y + 6, inner);
+
+    be_moveCursor(sb, x, y + 7);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+
+    const char *labels[2] = { " (O)pen ", " (C)ancel " };
+    int used = 0;
+    for (int i = 0; i < 2; i++) {
+        bool focused = ((int)od->focus == OD_FOCUS_OPEN + i);
+        used += be_drawDialogButton(sb, labels[i], focused);
+    }
+    for (int i = 0; i < inner - used; i++) sb_append(sb, " ");
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+
+	/* Last Pad */
+    be_drawDialogPadRow(sb, x, y + 8, inner);
+
+    /* Bottom border */
+    be_moveCursor(sb, x, y + 9);
+    sb_append(sb, "\x1b[" S_DIM "m" B_BL B_H);
+    const char *btm_msg = "tab/←→ switch · enter select · esc cancel";
+    sb_append(sb, btm_msg);
+    for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
+    sb_append(sb, B_BR S_RESET);
+
+	*cur_x = x + 4 + (int)od->inputlen;
+	*cur_y = y + 5;
+}
+
+void be_drawGotoDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
+	BE_GotoDialog *gd = &state.goto_dialog;
+
+    /* Geometry */
+    int width = state.screencols / 4;
+    int height = 10;
+    int x = (state.screencols - width) / 2;
+    int y = (state.screenrows - height) / 2;
+    int inner = width - 2;
+
+    /* Top Border */
+    be_moveCursor(sb, x, y);
+    sb_append(sb, "\x1b[" S_DIM "m" B_TL);
+    sb_append(sb, B_H " Open File ");
+    for (int i = 0; i < width - 14; i++) sb_append(sb, B_H);
+    sb_append(sb, B_TR S_RESET);
+
+	/* First Pad */
+    be_drawDialogPadRow(sb, x, y + 1, inner);
+
+	/* Open Dailog Message */
+	char buf[80];
+	snprintf(buf, sizeof(buf), "  Goto a line:");
+    be_drawDialogTextRow(sb, x, y + 2, inner, S_TEXT, buf);
+
+	/* Second Pad */
+    be_drawDialogPadRow(sb, x, y + 3, inner);
+
+	/* Text Box */
+    be_drawDialogTextRow(sb, x, y + 4, inner, S_DIM, "  goto: ");
+
+    be_moveCursor(sb, x, y + 5);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+    sb_append(sb, "\x1b[" S_ACCENT "m" " [ " S_RESET);
+    sb_append(sb, "\x1b[" S_TEXT "m");
+    sb_append(sb, gd->input);
+    int box_used = 3 + (int)gd->inputlen;
+    for (int i = 0; i < inner - box_used - 3; i++) sb_append(sb, " ");
+    sb_append(sb, S_RESET "\x1b[" S_ACCENT "m" " ] " S_RESET);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+
+	/* Third Pad */
+    be_drawDialogPadRow(sb, x, y + 6, inner);
+
+    be_moveCursor(sb, x, y + 7);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+
+    const char *labels[2] = { " (G)oto ", " (C)ancel " };
+    int used = 0;
+    for (int i = 0; i < 2; i++) {
+        bool focused = ((int)gd->focus == GD_FOCUS_GOTO + i);
+        used += be_drawDialogButton(sb, labels[i], focused);
+    }
+    for (int i = 0; i < inner - used; i++) sb_append(sb, " ");
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+
+	/* Last Pad */
+    be_drawDialogPadRow(sb, x, y + 8, inner);
+
+    /* Bottom border */
+    be_moveCursor(sb, x, y + 9);
+    sb_append(sb, "\x1b[" S_DIM "m" B_BL B_H);
+    const char *btm_msg = "tab/←→ switch · enter select · esc cancel";
+    sb_append(sb, btm_msg);
+    for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
+    sb_append(sb, B_BR S_RESET);
+
+	*cur_x = x + 4 + (int)gd->inputlen;
+	*cur_y = y + 5;
+}
+
+void be_drawPalette(StringBuilder *sb, int *cur_x, int *cur_y) {
+	BE_CmdPalette *p = &state.pal;
+
+	/* Geometry */
+	int width = state.screencols - 8;
+	if (width > 56) width = 56;
+	if (width < 18 || state.screenrows < 12) return;
+
+	int inner = width - 2;
+
+	int nvis = p->nfiltered;
+	if (nvis > p->max_rows || nvis < 1) nvis = p->max_rows;
+	int listrows = (p->nfiltered == 0) ? 1 : nvis;
+
+	int x = (state.screencols - width) / 2;
+	int y = 2;
+
+	/* scroll the list so the selection stays visible */
+	int top = 0;
+	if (p->sel >= p->max_rows) top = p->sel - p->max_rows + 1;
+
+	/* Top Border */
+	be_moveCursor(sb, x, y);
+	sb_append(sb, PAL_DIM B_TL);
+	sb_repeat(sb, B_H, inner);
+	sb_append(sb, B_TR PAL_RESET);
+
+	/* Input Field */
+	int qshow = p->qlen;
+	if (qshow > inner - 3) qshow = inner - 3;
+
+	be_moveCursor(sb, x, y+1);
+	sb_append(sb, PAL_DIM B_V PAL_RESET);
+	sb_append(sb, " " PAL_ACCENT "\xe2\x80\xba " PAL_RESET);
+	sb_append(sb, PAL_BOLD);
+	for (int i = 0; i < qshow; i++) {
+		char ch[2] = { p->query[i], '\0' };
+		sb_append(sb, ch);
+	}
+	
+	sb_append(sb, PAL_RESET);
+	sb_repeat(sb, " ", inner - 3 - qshow);
+	sb_append(sb, PAL_DIM B_V PAL_RESET);
+
+	/* Separator */
+	be_moveCursor(sb, x, y+2);
+	sb_append(sb, PAL_DIM B_LT);
+	sb_repeat(sb, B_H, inner);
+	sb_append(sb, B_RT PAL_RESET);
+
+	*cur_x = x + 4 + qshow;
+	*cur_y = y + 1;
+
+	/* Rows */
+	for (int r = 0; r < listrows; r++) {
+		int row_y = y + 3 + r;
+		be_moveCursor(sb, x, row_y);
+		sb_append(sb, PAL_DIM B_V PAL_RESET);
+
+		if (p->nfiltered == 0) {
+			const char *msg = PAL_DIM "No matching commands found" PAL_RESET;
+			sb_append(sb, msg);
+			sb_repeat(sb, " ", inner - 26);
+			sb_append(sb, PAL_DIM B_V PAL_RESET);
+			continue;
+		}
+
+		int idx = p->filtered[top+r];
+		bool selected = (top + r == p->sel);
+		const char *name = commands[idx].name;
+		const char *hint = commands[idx].hint;
+
+		int namew = utf8_width(name);
+		int hintw = utf8_width(hint);
+
+		if (namew > inner - 4) namew = inner - 4;
+		int gap = inner - 2 - namew - hintw;
+		if (gap < 1) { 
+			hintw = 0; 
+			hint = ""; 
+			gap = inner - 2 - namew; 
+		}
+
+		if (selected) sb_append(sb, PAL_SEL);
+
+		sb_append(sb, " ");
+		sb_append(sb, selected ? PAL_ACCENT : PAL_TEXT);
+		if (selected) sb_append(sb, PAL_SEL);
+		for (int i = 0; i < namew; i++) {
+			char ch[2] = {name[i], '\0' };
+			sb_append(sb, ch);
+		}
+		sb_append(sb, PAL_RESET);
+		if (selected) sb_append(sb, PAL_SEL);
+		sb_repeat(sb, " ", gap);
+		sb_append(sb, PAL_DIM);
+		if (selected) sb_append(sb, PAL_SEL);
+
+		sb_append(sb, hint);
+		sb_append(sb, " ");
+		sb_append(sb, PAL_RESET);
+
+		sb_append(sb, B_V);
+	}
+
+	/* Bottom Border */
+	be_moveCursor(sb, x, y + listrows + 3);
+	sb_append(sb, PAL_DIM B_BL);
+	sb_repeat(sb, B_H, inner);
+	sb_append(sb, B_BR PAL_RESET);
+}
+
+/* line editing */
+int is_word_char(char c) { return !isspace((unsigned char)c); }
+
+int word_backward_pos(const BE_Row *row) {
+	int pos = state.cur_x;
+	while (pos > 0 && !is_word_char(row->data[pos-1])) pos--;
+	while (pos > 0 && is_word_char(row->data[pos-1])) pos--;
+	return pos;
+}
+
+int word_forward_pos(const BE_Row *row) {
+	int pos = state.cur_x;
+	while (pos < row->size && !is_word_char(row->data[pos])) pos++;
+	while (pos < row->size && is_word_char(row->data[pos])) pos++;
+	return pos;
+}
+
+void be_word_move_forward() {
+	if (state.cur_y < 0 || state.cur_y >= state.numrows) return;
+	BE_Row *row = &state.row[state.cur_y];
+	state.cur_x = word_forward_pos(row);
+}
+
+void be_word_move_backward() {
+	if (state.cur_y < 0 || state.cur_y >= state.numrows) return;
+	BE_Row *row = &state.row[state.cur_y];
+	state.cur_x = word_backward_pos(row);
+}
+
+void be_delete_word_backward() {
+	if (state.cur_y < 0 || state.cur_y >= state.numrows) return;
+	BE_Row *row = &state.row[state.cur_y];
+	int start = word_backward_pos(row);
+	int end = state.cur_x;
+	if (start == end) return;
+	memmove(&row->data[start], &row->data[end], row->size - end);
+	row->size -= (end - start);
+	row->data[row->size] = '\0';
+	state.cur_x = start;
+	be_updateRow(row);
+	state.dirty++;
+}
+
+void be_delete_word_forward() {
+	if (state.cur_y < 0 || state.cur_y >= state.numrows) return;
+	BE_Row *row = &state.row[state.cur_y];
+	int start = state.cur_x;
+	int end = word_forward_pos(row);
+	if (start == end) return;
+	memmove(&row->data[start], &row->data[end], row->size - end);
+	row->size -= (end - start);
+	row->data[row->size] = '\0';
+	be_updateRow(row);
+	state.dirty++;
+}
+
+void line_delete_to_start() {
+	if (state.cur_y < 0 || state.cur_y >= state.numrows) return;
+	BE_Row *row = &state.row[state.cur_y];
+
+    memmove(&row->data[0], &row->data[state.cur_x], row->size - state.cur_x);
+    row->size -= state.cur_x;
+    row->data[row->size] = '\0';
+    state.cur_x = 0;
+    be_updateRow(row);
+    state.dirty++;
+}
+
+void line_delete_to_end() {
+	if (state.cur_y < 0 || state.cur_y >= state.numrows) return;
+	BE_Row *row = &state.row[state.cur_y];
+
+	row->size = state.cur_x;
+	row->data[row->size] = '\0';
+	be_updateRow(row);
+	state.dirty++;
+}
+
 
 /* Input Processing */
 void be_handleArrowKeys(int key) {
@@ -816,12 +1577,8 @@ void be_handleArrowKeys(int key) {
 }
 
 
-/* Commits whatever is in the input bar as the filename and saves. If the
- * dialog was opened from Ctrl+Q, finishes by quitting instead of just
- * closing the dialog — showing what got saved (or, on failure, why it
- * didn't) rather than an unqualified "Quitting ...". */
 static void be_saveDialog_commit(void) {
-	BE_SaveDialog *sd = &state.save_diaglog;
+	BE_SaveDialog *sd = &state.save_dialog;
 
 	if (state.filename != NULL) free(state.filename);
 	state.filename = strdup(sd->input_path);
@@ -844,7 +1601,7 @@ static void be_saveDialog_commit(void) {
 }
 
 void processSaveDialogKeypress(int c) {
-	BE_SaveDialog *sd = &state.save_diaglog;
+	BE_SaveDialog *sd = &state.save_dialog;
 
 	switch (c) {
 		case '\x1b':
@@ -894,7 +1651,7 @@ void processSaveDialogKeypress(int c) {
 	}
 
 	if (sd->focus == SD_FOCUS_INPUT) {
-		if (c >= 32 && c < 127 && sd->inputlen < MAX_FILENAME_SIZE) {
+		if (c >= 32 && c < 127 && sd->inputlen < MAX_INPUT_SIZE) {
 			sd->input_path[sd->inputlen++] = (char)c;
 			sd->input_path[sd->inputlen] = '\0';
 		}
@@ -915,10 +1672,199 @@ void processSaveDialogKeypress(int c) {
 	}
 }
 
+
+void processOpenDialogKeypress(int c) {
+	BE_OpenDialog *od = &state.open_dialog;
+
+	switch (c) {
+		case '\x1b':
+			be_openDialog_close(od);
+			return;
+
+		// Tab always cycles focus forward: input -> Save -> Quit -> Cancel -> input.
+		case '\t':
+			od->focus = (od->focus + 1) % OD_FOCUS_COUNT;
+			return;
+
+		// Left/Right also walk the button bar, once a button has focus.
+		case ARROW_LEFT:
+		case ARROW_RIGHT:
+			if (od->focus != OD_FOCUS_INPUT) {
+				int btn = od->focus - OD_FOCUS_OPEN;
+				int dir = (c == ARROW_RIGHT) ? 1 : -1;
+				btn = (btn + dir + 2) % 2;
+				od->focus = OD_FOCUS_OPEN + btn;
+			}
+			return;
+
+		case BACKSPACE:
+		case CTRL_KEY('h'):
+			if (od->focus == OD_FOCUS_INPUT && od->inputlen > 0) {
+				od->input_path[--od->inputlen] = '\0';
+			}
+			return;
+
+		// Enter performs whatever currently has focus: from the input bar
+		// that's Save (finish typing, then commit), from a button it's
+		// that button's action.
+		case '\r':
+			switch (od->focus) {
+				case OD_FOCUS_INPUT:
+				case OD_FOCUS_OPEN:
+					be_openDialog_commit();
+					return;
+				case OD_FOCUS_CANCEL:
+				default:
+					be_openDialog_close(od);
+					return;
+			}
+	}
+
+	if (od->focus == OD_FOCUS_INPUT) {
+		if (c >= 32 && c < 127 && od->inputlen < MAX_INPUT_SIZE) {
+			od->input_path[od->inputlen++] = (char)c;
+			od->input_path[od->inputlen] = '\0';
+		}
+		return;
+	}
+
+	// Direct hotkeys still work no matter which button currently has focus.
+	switch (c) {
+		case 'c':
+			be_openDialog_close(od);
+			return;
+		case 'o':
+			be_openDialog_commit();
+			return;
+	}
+}
+
+void processGotoDialogKeypress(int c) {
+	BE_GotoDialog *gd = &state.goto_dialog;
+
+	switch (c) {
+		case '\x1b':
+			be_gotoDialog_close(gd);
+			return;
+
+		// Tab always cycles focus forward: input -> Save -> Quit -> Cancel -> input.
+		case '\t':
+			gd->focus = (gd->focus + 1) % OD_FOCUS_COUNT;
+			return;
+
+		// Left/Right also walk the button bar, once a button has focus.
+		case ARROW_LEFT:
+		case ARROW_RIGHT:
+			if (gd->focus != GD_FOCUS_INPUT) {
+				int btn = gd->focus - GD_FOCUS_GOTO;
+				int dir = (c == ARROW_RIGHT) ? 1 : -1;
+				btn = (btn + dir + 2) % 2;
+				gd->focus = GD_FOCUS_GOTO + btn;
+			}
+			return;
+
+		case BACKSPACE:
+		case CTRL_KEY('h'):
+			if (gd->focus == GD_FOCUS_INPUT && gd->inputlen > 0) {
+				gd->input[--gd->inputlen] = '\0';
+			}
+			return;
+
+		case '\r':
+			switch (gd->focus) {
+				case GD_FOCUS_INPUT:
+				case GD_FOCUS_GOTO:
+					be_gotoDialog_commit(&state.goto_dialog);
+					return;
+				case OD_FOCUS_CANCEL:
+				default:
+					be_gotoDialog_close(gd);
+					return;
+			}
+	}
+
+	if (gd->focus == GD_FOCUS_INPUT) {
+		if (c >= 32 && c < 127 && gd->inputlen < MAX_INPUT_SIZE) {
+			gd->input[gd->inputlen++] = (char)c;
+			gd->input[gd->inputlen] = '\0';
+		}
+		return;
+	}
+
+	// Direct hotkeys still work no matter which button currently has focus.
+	switch (c) {
+		case 'c':
+			be_gotoDialog_close(gd);
+			return;
+		case 'g':
+			be_gotoDialog_commit(&state.goto_dialog);
+			return;
+	}
+
+}
+
+void processPaletteKeypress(int c) {
+	BE_CmdPalette *p = &state.pal;
+	switch (c) {
+		case '\x1b':
+		case CTRL_KEY('p'):
+			be_paletteClose();
+			break;
+
+		case '\r':
+			be_paletteExecuteCmd();
+			return;
+
+		case ARROW_UP:
+		case CTRL_KEY('k'):
+			if (p->sel > 0) p->sel--;
+			return;
+
+		case ARROW_DOWN:
+		case CTRL_KEY('j'):
+			if (p->sel < p->nfiltered - 1) p->sel++;
+			return;
+
+
+		case BACKSPACE:
+		case CTRL_KEY('h'):
+			if (p->qlen > 0) {
+				p->query[--p->qlen] = '\0';
+				p->sel = 0;
+				be_paletteRefilter();
+			}
+			return;
+
+		case CTRL_KEY('d'):
+			p->qlen = 0;
+			p->query[0] = '\0';
+			p->sel = 0;
+			be_paletteRefilter();
+			return;
+	}
+
+	if (c >= 32 && c < 127 && p->qlen < MAX_INPUT_SIZE) {
+		p->query[p->qlen++] = (char)c;
+		p->query[p->qlen] = '\0';
+		p->sel = 0;
+		be_paletteRefilter();
+	}
+}
+
 void be_processKeypress() {
 	int c = be_readKey();
 
 	if (state.mode == SPLASH) {
+		if (state.pal.open) {
+			processPaletteKeypress(c);
+			return;
+		}
+
+		if (state.open_dialog.active) {
+			processOpenDialogKeypress(c);
+			return;
+		}
+
 		switch(c) {
 			case '\r':
 				be_openBlankFile();
@@ -926,13 +1872,36 @@ void be_processKeypress() {
 
 			case CTRL_KEY('q'):
 				be_quitEditor();
-				break;
+				return;
+
+			case CTRL_KEY('p'):
+				be_paletteOpen();
+				return;
+
+			case CTRL_KEY('o'):
+				be_openDialog_open(&state.open_dialog);
+				return;
 		}
 		return;
 	}
 
-	if (state.save_diaglog.active) {
+	if (state.save_dialog.active) {
 		processSaveDialogKeypress(c);
+		return;
+	}
+
+	if (state.open_dialog.active) {
+		processOpenDialogKeypress(c);
+		return;
+	}
+
+	if (state.goto_dialog.active) {
+		processGotoDialogKeypress(c);
+		return;
+	}
+
+	if (state.pal.open) {
+		processPaletteKeypress(c);
 		return;
 	}
 
@@ -959,9 +1928,21 @@ void be_processKeypress() {
 			be_saveFile(NULL);
 			break;
 
-        case CTRL_KEY('w'):
-			be_saveDialog_open(&state.save_diaglog);
+        case CTRL_SHIFT_S:
+			be_saveDialog_open(&state.save_dialog);
             return;
+
+		case CTRL_KEY('o'):
+			be_openDialog_open(&state.open_dialog);
+			return;
+
+		case CTRL_KEY('g'):
+			be_gotoDialog_open(&state.goto_dialog);
+			return;
+
+		case CTRL_KEY('p'):
+			be_paletteOpen();
+			break;
 
 		// HOME/END move within the current line; CTRL_HOME/CTRL_END jump
 		// to the start/end of the whole document.
@@ -1010,6 +1991,23 @@ void be_processKeypress() {
 		case ARROW_LEFT:
 		case ARROW_RIGHT:
 			be_handleArrowKeys(c);
+			break;
+
+		case WORD_RIGHT:
+			be_word_move_forward();
+			break;
+
+		case WORD_LEFT:
+			be_word_move_backward();
+			break;
+
+		case CTRL_KEY('w'):
+		case CTRL_BACKSPACE:
+			be_delete_word_backward();
+			break;
+
+		case WORD_DELETE:
+			be_delete_word_forward();
 			break;
 
 		case CTRL_KEY('l'):
@@ -1112,6 +2110,14 @@ void be_freeRow(BE_Row *row) {
     free(row->data);
 }
 
+// Frees every row in the buffer and resets numrows to 0, so a subsequent
+// open can start from a clean slate instead of appending onto whatever
+// was already loaded.
+void be_clearRows(void) {
+	for (int i = 0; i < state.numrows; i++) be_freeRow(&state.row[i]);
+	state.numrows = 0;
+}
+
 void be_deleteRow(int at) {
     if (at < 0 || at >= state.numrows) return;
     be_freeRow(&state.row[at]);
@@ -1182,6 +2188,35 @@ void be_deleteChar() {
 
 
 /* File I/O */
+bool validFilename(const char *filename) {
+	if (filename == NULL || filename[0] == '\0') return false;
+	if (strlen(filename) > PATH_MAX) return false;
+
+	const char *p = filename;
+	while (*p) {
+		const char *slash = strchr(p, '/');
+		size_t len = slash ? (size_t)(slash - p) : strlen(p);
+		if (len > NAME_MAX) return false;
+		if (!slash) break;
+		p = slash + 1;
+	}
+	return true;
+}
+
+bool checkFileExists(const char *filepath) {
+	struct stat st;
+	return stat(filepath, &st) == 0;
+}
+
+int isDir(const char *filename) {
+	if (!validFilename(filename)) return -1; // Invalid filename error
+	if (!checkFileExists(filename)) return 0;
+	struct stat st;
+	if (stat(filename, &st) != 0) return -2; // Stat Error
+	return S_ISDIR(st.st_mode);
+}
+
+
 void be_openFile(const char *filename) {
 	if (state.filename != NULL) free(state.filename);
 	state.filename = strdup(filename);
@@ -1189,6 +2224,8 @@ void be_openFile(const char *filename) {
 	FILE *fp = fopen(filename, "r");
 	if (!fp) be_die("Could not open file !!");
 	state.mode = EDIT;
+
+	be_clearRows(); // start from an empty buffer, don't append onto rows from a previously open file
 
 	char *line = NULL;
 	size_t linecap = 0;
@@ -1206,6 +2243,7 @@ void be_openFile(const char *filename) {
 }
 
 void be_openBlankFile() {
+	be_clearRows(); // start from an empty buffer, don't append onto rows from a previously open file
 	be_insertRow(state.numrows, "", 0);
 	if (state.filename != NULL) free(state.filename);
 	state.filename = NULL;
@@ -1216,12 +2254,9 @@ void be_openBlankFile() {
 }
 
 
-// Returns whether the save succeeded, and (when it did) hands the byte
-// count back through `out_len` so callers that need to build their own
-// message — e.g. the quit-after-save flow — don't have to redo the I/O.
 bool be_saveFile(size_t *out_len) {
-	if (state.filename == NULL) {
-		state.save_diaglog.active = true;
+	if (state.filename == NULL && state.mode != SPLASH) {
+		state.save_dialog.active = true;
 		return false;
 	}
 
@@ -1287,6 +2322,11 @@ void editorScroll() {
 	}
 }
 
+void be_setStatusMsg(const char *msg) {
+	snprintf(state.statusmsg, sizeof(state.statusmsg), "%s", msg);
+	state.statusmsg_time = time(NULL);
+}
+
 void be_refreshScreen() {
 	editorScroll();
 
@@ -1305,7 +2345,7 @@ void be_refreshScreen() {
 	if (state.mode == SPLASH) {
 		be_drawHomepage(&sb);
 		be_moveCursor(&sb, 0, state.screenrows);
-	} else if (!state.save_diaglog.active) {
+	} else if (!state.save_dialog.active && !state.open_dialog.active) {
 		char buf[32];
 		snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
 				(state.cur_y - state.rowoff) + 1,
@@ -1314,11 +2354,11 @@ void be_refreshScreen() {
 		sb_append(&sb, "\x1b[?25h");
 	}
 
-    if (state.save_diaglog.active) {
+    if (state.save_dialog.active) {
         int dlg_x, dlg_y;
         be_drawSaveDialog(&sb, &dlg_x, &dlg_y);
 
-		if (state.save_diaglog.focus == SD_FOCUS_INPUT) {
+		if (state.save_dialog.focus == SD_FOCUS_INPUT) {
 			char buf[32];
 			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", dlg_y + 1, dlg_x + 1);
 			sb_append(&sb, buf);
@@ -1326,12 +2366,45 @@ void be_refreshScreen() {
 		}
     }
 
+	if (state.open_dialog.active) {
+		int dlg_x, dlg_y;
+		be_drawOpenDialog(&sb, &dlg_x, &dlg_y);
+
+		if (state.open_dialog.focus == OD_FOCUS_INPUT) {
+			char buf[32];
+			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", dlg_y + 1, dlg_x + 1);
+			sb_append(&sb, buf);
+			sb_append(&sb, "\x1b[?25h");
+		}
+	}
+
+	if (state.goto_dialog.active) {
+		int dlg_x, dlg_y;
+		be_drawGotoDialog(&sb, &dlg_x, &dlg_y);
+
+		if (state.goto_dialog.focus == GD_FOCUS_INPUT) {
+			char buf[32];
+			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", dlg_y + 1, dlg_x + 1);
+			sb_append(&sb, buf);
+			sb_append(&sb, "\x1b[?25h");
+		}
+	}
+
+	if (state.pal.open) {
+		state.save_dialog.active = false;
+        int cmd_x, cmd_y;
+		be_drawPalette(&sb, &cmd_x, &cmd_y);
+		char buf[32];
+		snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cmd_y + 1, cmd_x + 1);
+		sb_append(&sb, buf);
+		sb_append(&sb, "\x1b[?25h");
+	}
+
 	size_t res = write(STDOUT_FILENO, sb.data, sb.len);
 	be_check_and_raise(res == sb.len, "Could not clear screen", BE_ERR_RENDER);
 
 	sb_free(&sb);
 }
-
 
 /* Initialization && Closing */
 void be_freeEditor(void) {
@@ -1365,6 +2438,11 @@ void be_initEditor(void) {
 	state.filename = NULL;
 	state.mode = SPLASH;
 
+	// Cmd Palette Init
+	state.pal.open = false;
+	state.pal.max_rows = 7;
+	state.pal.nfiltered = 7;
+
 	atexit(be_freeEditor);
 
 	if (be_getWindowSize(&state.screenrows, &state.screencols) == -1) be_die("be_getWindowSize");
@@ -1373,13 +2451,16 @@ void be_initEditor(void) {
 
 void be_quitNow(const char *message) {
 	// Get the dialog out of the way so the message is what's visible.
-	state.save_diaglog.active = false;
+	state.save_dialog.active = false;
 
 	snprintf(state.statusmsg, sizeof(state.statusmsg), "%s", message ? message : "Quitting ...");
 	state.statusmsg_time = time(NULL);
 	be_refreshScreen();
 
-	sleep(1);
+	struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 200000000L; // 200,000,000 ns = 0.2 s
+    nanosleep(&ts, NULL);
 
 	int res = write(STDOUT_FILENO, "\x1b[2J", 4);
 	res += write(STDOUT_FILENO, "\x1b[H", 3);
@@ -1391,8 +2472,8 @@ void be_quitNow(const char *message) {
 
 void be_quitEditor(void) {
 	if (state.dirty != 0) {
-		be_saveDialog_open(&state.save_diaglog);
-		state.save_diaglog.quit_on_save = true;
+		be_saveDialog_open(&state.save_dialog);
+		state.save_dialog.quit_on_save = true;
 		return;
 	}
 
@@ -1404,8 +2485,21 @@ int main(int argc, char **argv) {
     be_enableRawMode();
 	be_initEditor();
 
+	// Open the file
 	if (argc >= 2) {
-		be_openFile(argv[1]);
+		char *filepath = argv[1];
+		if (!validFilename(filepath)) be_setStatusMsg("{X} Invalid filename provided");
+		int is_dir_res = isDir(filepath);
+		if (is_dir_res == -1) be_setStatusMsg("{X} Invalid filename provided");
+		else if (is_dir_res == -2) be_setStatusMsg("{X} Error occured while opening");
+		else if (is_dir_res == 1) be_setStatusMsg("{X} Provided path is a directory");
+		else {
+			if (checkFileExists(filepath)) be_openFile(argv[1]);
+			else {
+				be_openBlankFile();
+				state.filename = strdup(filepath);
+			}
+		}
 	}
     while (1) {
 		be_refreshScreen();

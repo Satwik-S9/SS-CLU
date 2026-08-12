@@ -1,5 +1,5 @@
 # All Tasks 
-## Main Focus
+## Focus : V1.0
 - [x] Draw the basic-editor welcome message in the center of the editor
     - NOTE: Opening a file opens the buffer and the welcome message is now removed (Screen Refreshes)
 - [x] Enable cursor moving and basic text editing in the editor
@@ -7,10 +7,14 @@
 - [x] Convert the current text viewer to a text editor
 - [x] Floating window confirmation for quitting without saving the changes
 - [x] Enable the status-message functionality.
-- [ ] Port all configuration to config.h file
+- [x] Make command pallete and also have a switch theme functionality for it 
+- [x] Enable Open & Goto Dialog boxes
+- [x] Enable readline like editing in the editor | i.e. use a line struct
+- [ ] Add Ctrl+A, Ctrl+E, Alt+A, Alt+E
+- [ ] Enable find functionality for the editor
+- [ ] Add mouse capability to the editor
 - [ ] Unify some interfaces
-- [ ] Make command pallete and also have a switch theme functionality for it 
-- [ ] Enable readline like editing in the editor | i.e. use a line struct
+- [ ] Port all configuration to config.h file
 
 
 # Planned Features
@@ -20,8 +24,13 @@
 - A very basic configuration file containing (config.h)
   - How many spaces should each tab use (DEFAULT: 4)
   - Colorschemes to use: Default Terminal Colors
-- Refine the cursor position logic (Calculating rx on tabs)
-- DEL, BACKSPACE, CTRL+DEL, CTRL+BACKSPACE and CTRL+ARROW keys should be handled
+- DEL, BACKSPACE, CTRL+DEL, CTRL+BACKSPACE and CTRL+ARROW keys should be handled (Readline like functionality)
+- Simple and Minimal dialog boxes for handling basic operations
+- A basic find feature
+- A find and replace feature
+- Enable line and word selection features
+- Keymaps for CTRL+C, CTRL+V (Clipboard), CTRL+X
+- Syntax Highlighting
 
 ## Keymaps
 1. `CTRL + SHIFT + E`: Goto the end of the file

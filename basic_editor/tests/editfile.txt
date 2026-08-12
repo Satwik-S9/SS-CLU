@@ -12,3 +12,6 @@ So I can edit this file as freely as I want !!
 
 This is a simple test
 Another Test
+
+Some file which I write to constantly for testing. This works quite nicely for me !!
+Now testing write as spawning with command palette 

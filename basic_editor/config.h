@@ -15,4 +15,3 @@ struct StatusBar_Theme {
 	#define STATUS_BAR_BACKGROUND "#e1e1e1"
 	#define STATUS_BAR_FOREGROUND "#2d2d2d"
 #endif
-
