@@ -14,6 +14,7 @@
 #include <time.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 #include "config.h"
 
@@ -57,6 +58,8 @@
 
 #define S_DIM    "38;5;240"
 #define S_ACCENT "38;2;133;153;0"
+#define S_ERROR  "38;2;220;50;47"
+#define S_FILE 	 "38;2;114;114;114"
 #define S_RESET  "\x1b[0m"
 
 /** Palette Highlights **/
@@ -76,6 +79,7 @@
 
 #define PAL_RESET  "\x1b[0m"
 #define PAL_ACCENT "\x1b[38;2;133;153;0m"
+#define PAL_ERROR  "\x1b[38;2;220;50;47m"
 
 // Mod Keys !!
 #define MOD_SHIFT 0x01
@@ -240,6 +244,20 @@ typedef struct {
 	char *render;
 } BE_Row;
 
+
+/* Find: incremental search over the current buffer. */
+typedef struct { int row, col; } BE_Match;   /* col = byte index into row->data */
+
+typedef struct {
+	bool 		active;
+	int  		inputlen;
+	int 		nmatches;
+	int			cur;
+	int 		saved_cur_x, saved_cur_y, saved_rowoff, saved_coloff;
+	BE_Match 	*matches;
+	char 		input[MAX_INPUT_SIZE + 1];
+} BE_Find;
+
 typedef enum {
 	CMD_SAVE = 0,
 	CMD_SAVEAS,
@@ -294,6 +312,7 @@ typedef struct {
 	BE_GotoDialog   goto_dialog;
 	BE_OpenDialog	open_dialog;
     BE_SaveDialog 	save_dialog;
+	BE_Find 		find;	
 	BE_CmdPalette   pal;
 	BE_Row 			*row;
 	char			*filename;
@@ -313,6 +332,7 @@ void be_openBlankFile();
 void be_editorInsertChar(int c);
 bool be_saveFile(size_t *out_len);
 void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y);
+void be_drawRowWithMatches(StringBuilder *sb, int filerow, int coloff, int len);
 void be_deleteChar();
 void be_insertNewLine();
 bool validFilename(const char *filename);
@@ -323,6 +343,7 @@ void be_openBlankFile();
 void be_openFile(const char *filename);
 void be_clearRows(void);
 void be_updateRow(BE_Row *row);
+int be_calculateRx(BE_Row *row, int cx);
 
 /** String Builder Methods **/
 void sb_init(StringBuilder *sb) {
@@ -506,6 +527,110 @@ void be_gotoDialog_commit(BE_GotoDialog *gd) {
 	state.cur_x = 0;
 }
 
+/* Find Methods */
+static const char *be_ciStrstr(const char *hay, const char *needle) {
+	if (!needle) return hay;
+	for (; *hay; hay++) {
+		const char *h = hay, *n = needle;
+		while (*h && *n && tolower((unsigned char)*h) == tolower((unsigned char)*n)) { h++; n++; }
+		if (!*n) return hay;
+	}
+	return NULL;
+}
+
+static void be_findRebuildMatches(void) {
+	BE_Find *f = &state.find;
+	free(f->matches);
+	f->matches = NULL;
+	f->nmatches = 0;
+	f->cur = -1;
+	if (f->inputlen == 0) return;
+
+	int cap = 0;
+	for (int r = 0; r < state.numrows; r++) {
+		const char *hay = state.row[r].data;
+		int col = 0;
+		while (1) {
+			const char *hit = be_ciStrstr(hay + col, f->input);
+			if (!hit) break;
+			col = (int)(hit - state.row[r].data);
+
+			if (f->nmatches == cap) {
+				cap = cap ? cap * 2 : 16;
+				f->matches = realloc(f->matches, cap * sizeof(BE_Match));
+				if (!f->matches) be_die("realloc");
+			}
+			f->matches[f->nmatches++] = (BE_Match){ r, col };
+			col += 1;   /* allow overlapping matches, e.g. "aa" inside "aaa" */
+		}
+	}
+}
+
+
+static void be_findJump(int idx) {
+	BE_Find *f = &state.find;
+	if (idx < 0 || idx >= f->nmatches) return;
+	f->cur = idx;
+	state.cur_y = f->matches[idx].row;
+	state.cur_x = f->matches[idx].col;
+}
+
+static void be_findSeekFromSaved(void) {
+	BE_Find *f = &state.find;
+	if (f->nmatches == 0) return;
+	for (int i = 0; i < f->nmatches; i++) {
+		BE_Match *m = &f->matches[i];
+		if (m->row > f->saved_cur_y ||
+		    (m->row == f->saved_cur_y && m->col >= f->saved_cur_x)) {
+			be_findJump(i);
+			return;
+		}
+	}
+	be_findJump(0);   /* wrap */
+}
+
+static void be_findNext(void) {
+	BE_Find *f = &state.find;
+	if (f->nmatches == 0) return;
+	be_findJump((f->cur + 1) % f->nmatches);
+}
+
+static void be_findPrev(void) {
+	BE_Find *f = &state.find;
+	if (f->nmatches == 0) return;
+	be_findJump((f->cur - 1 + f->nmatches) % f->nmatches);
+}
+
+void be_findOpen(void) {
+	if (state.mode == SPLASH) return;
+	
+	BE_Find *f = &state.find;
+	f->active = true;
+	f->inputlen = 0;
+	f->input[0] = '\0';
+
+	f->saved_cur_x  = state.cur_x;
+	f->saved_cur_y  = state.cur_y;
+	f->saved_rowoff = state.rowoff;
+	f->saved_coloff = state.coloff;
+	be_findRebuildMatches();
+}
+
+void be_findClose(bool confirm) {
+	BE_Find *f = &state.find;
+	if (!confirm) {
+		state.cur_x  = f->saved_cur_x;
+		state.cur_y  = f->saved_cur_y;
+		state.rowoff = f->saved_rowoff;
+		state.coloff = f->saved_coloff;
+	}
+	f->active = false;
+	free(f->matches);
+	f->matches = NULL;
+	f->nmatches = 0;
+	f->cur = -1;
+}
+
 /* Cmd Palette Methods */
 static bool fuzzy_match(const char *hay, const char *needle) {
 	if (!needle || *needle == '\0') return true;
@@ -632,7 +757,13 @@ static void be_paletteExecuteCmd(void) {
 
 		case CMD_FIND:
 			be_paletteClose();
-			be_setStatusMsg("{X} Find is not implemented yet");
+			// Do not execute when on homepage
+			if (state.mode == SPLASH) {
+				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
+				state.statusmsg_time = time(NULL);
+				return;
+			}
+			be_findOpen();
 			return;
 	}
 }
@@ -962,7 +1093,10 @@ int be_drawRows(StringBuilder *sb) {
 			sb_append(sb, linenum);
 
 			if (len > 0) {
-				sb_appendn(sb, &state.row[filerow].render[state.coloff], (size_t)len);
+				if (state.find.active && state.find.nmatches > 0)
+					be_drawRowWithMatches(sb, filerow, state.coloff, len);
+				else
+					sb_appendn(sb, &state.row[filerow].render[state.coloff], (size_t)len);
 			}
 			res = 0;
 		}
@@ -1116,12 +1250,16 @@ static void be_drawDialogTextRow(StringBuilder *sb, int x, int y, int inner,
 /* One button in the button bar: highlighted (reverse video) when it has
  * focus, dim otherwise. Returns the number of cells it drew, so the
  * caller can work out how much trailing padding is left. */
-static int be_drawDialogButton(StringBuilder *sb, const char *label, bool focused) {
+static int be_drawDialogButton(StringBuilder *sb, const char *label, bool focused, const char *focus_clr) {
 	sb_append(sb, "  ");
-	sb_append(sb, focused ? "\x1b[7;" S_ACCENT "m" : "\x1b[" S_DIM "m");
+	char focus_esc_code[32];
+	snprintf(focus_esc_code, sizeof(focus_esc_code), "\x1b[7;%sm",  focus_clr);
+	sb_append(sb, focused ? focus_esc_code : "\x1b[" S_DIM "m");
+	sb_append(sb, "[");
 	sb_append(sb, label);
+	sb_append(sb, "]");
 	sb_append(sb, S_RESET);
-	return 2 + utf8_width(label);
+	return 4 + utf8_width(label);
 }
 
 void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
@@ -1183,7 +1321,11 @@ void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
     int used = 0;
     for (int i = 0; i < 3; i++) {
         bool focused = ((int)sd->focus == SD_FOCUS_SAVE + i);
-        used += be_drawDialogButton(sb, labels[i], focused);
+		if (sd->focus == SD_FOCUS_QUIT) {
+			used += be_drawDialogButton(sb, labels[i], focused, S_ERROR);
+		} else {
+			used += be_drawDialogButton(sb, labels[i], focused, S_ACCENT);
+		}
     }
     for (int i = 0; i < inner - used; i++) sb_append(sb, " ");
     sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
@@ -1208,12 +1350,23 @@ void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 void be_drawOpenDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 	BE_OpenDialog *od = &state.open_dialog;
 
+	/* List the contents of current directory */
+	int extra_height = 0;
+	struct dirent **contents;
+	int n = scandir(".", &contents, NULL, alphasort);
+	extra_height = (n > 8) ? 8 : n;
+
     /* Geometry */
-    int width = state.screencols / 4;
-    int height = 10;
+    int width = state.screencols / 3;
+    int height = 13 + extra_height;
     int x = (state.screencols - width) / 2;
     int y = (state.screenrows - height) / 2;
     int inner = width - 2;
+
+	if (height > state.screenrows) {
+		height = 13;
+		extra_height = 0;
+	}
 
     /* Top Border */
     be_moveCursor(sb, x, y);
@@ -1249,23 +1402,55 @@ void be_drawOpenDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 	/* Third Pad */
     be_drawDialogPadRow(sb, x, y + 6, inner);
 
+	/* Directory Contents */
     be_moveCursor(sb, x, y + 7);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+    sb_append(sb, "\x1b[" S_DIM "m" B_LT B_H);
+	char dirinfo[64];
+	snprintf(dirinfo, sizeof(dirinfo), " %d items in the directory · %d listed ", n, extra_height);
+	sb_append(sb, dirinfo);
+	for (int i = 0; i < inner - utf8_width(dirinfo) - 1; i++) sb_append(sb, "\x1b[" S_DIM "m" B_H S_RESET);
+	sb_append(sb, "\x1b[" S_DIM "m" B_RT S_RESET);
 
+	int di = 0;
+	for (di = 0; di <= extra_height; di++) {
+		be_moveCursor(sb, x, y + 8 + di);
+		sb_append(sb, "\x1b[" S_DIM "m" B_V "  ");
+		if (di == extra_height) {
+			sb_append(sb, "🞃 ");
+			for (int i = 0; i < inner - 4; i++) sb_append(sb, " ");
+		} else {
+			if (contents[di]->d_type == 8) {
+				sb_append(sb, S_RESET "\x1b[" S_FILE "m");
+				sb_append(sb, contents[di]->d_name);
+				sb_append(sb, S_RESET "\x1b[" S_DIM "m");
+			} else {
+				sb_append(sb, contents[di]->d_name);
+			}
+			for (int i = 0; i < inner - utf8_width(contents[di]->d_name) - 2; i++) sb_append(sb, " ");
+		}
+		sb_append(sb, B_V S_RESET);
+	}
+
+	/* Fourth Pad */
+    be_drawDialogPadRow(sb, x, y + 8 + di, inner);
+
+	/* Buttons */
+    be_moveCursor(sb, x, y + di + 9);
+    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
     const char *labels[2] = { " (O)pen ", " (C)ancel " };
     int used = 0;
     for (int i = 0; i < 2; i++) {
         bool focused = ((int)od->focus == OD_FOCUS_OPEN + i);
-        used += be_drawDialogButton(sb, labels[i], focused);
+        used += be_drawDialogButton(sb, labels[i], focused, S_ACCENT);
     }
     for (int i = 0; i < inner - used; i++) sb_append(sb, " ");
     sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
 
 	/* Last Pad */
-    be_drawDialogPadRow(sb, x, y + 8, inner);
+    be_drawDialogPadRow(sb, x, y + 10 + di, inner);
 
     /* Bottom border */
-    be_moveCursor(sb, x, y + 9);
+    be_moveCursor(sb, x, y + 11 + di);
     sb_append(sb, "\x1b[" S_DIM "m" B_BL B_H);
     const char *btm_msg = "tab/←→ switch · enter select · esc cancel";
     sb_append(sb, btm_msg);
@@ -1274,6 +1459,8 @@ void be_drawOpenDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 
 	*cur_x = x + 4 + (int)od->inputlen;
 	*cur_y = y + 5;
+
+	free(contents);
 }
 
 void be_drawGotoDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
@@ -1327,7 +1514,7 @@ void be_drawGotoDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
     int used = 0;
     for (int i = 0; i < 2; i++) {
         bool focused = ((int)gd->focus == GD_FOCUS_GOTO + i);
-        used += be_drawDialogButton(sb, labels[i], focused);
+        used += be_drawDialogButton(sb, labels[i], focused, S_ACCENT);
     }
     for (int i = 0; i < inner - used; i++) sb_append(sb, " ");
     sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
@@ -1346,6 +1533,111 @@ void be_drawGotoDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 	*cur_x = x + 4 + (int)gd->inputlen;
 	*cur_y = y + 5;
 }
+
+
+void be_drawFindBar(StringBuilder *sb, int *cur_x, int *cur_y) {
+	BE_Find *f = &state.find;
+
+	/* Geometry */
+	int width = state.screencols / 3;
+	if (width < 36) width = 36;
+	if (width > state.screencols - 4) width = state.screencols - 4;
+	if (width < 20 || state.screenrows < 8) return;   /* too small; bail */
+	int x = (state.screencols - width) / 2;
+	int y = 2;
+	int inner = width - 2;
+
+	/* Top border */
+	be_moveCursor(sb, x, y);
+	sb_append(sb, "\x1b[" S_DIM "m" B_TL);
+	sb_append(sb, B_H " find ");
+	for (int i = 0; i < width - 9; i++) sb_append(sb, B_H);
+	sb_append(sb, B_TR S_RESET);
+
+	/* Input row */
+	int field_w = inner - 3;
+	if (field_w < 1) field_w = 1;
+	int caret_col = f->inputlen;
+
+	be_moveCursor(sb, x, y + 1);
+	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	sb_append(sb, "\x1b[" S_ACCENT "m" " \xe2\x80\xba " S_RESET);
+	sb_append(sb, "\x1b[" S_TEXT "m");
+	sb_append(sb, f->input);
+	sb_append(sb, S_RESET);
+	for (int i = 0; i < inner - f->inputlen - 3; i++) sb_append(sb, " ");
+	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+
+	*cur_x = x + 4 + caret_col;
+	*cur_y = y + 1;
+
+	/* Status row: match count, or a hint before anything's typed. */
+	char status[96];
+	if (f->inputlen == 0) {
+		snprintf(status, sizeof(status), "  type to search");
+	} else if (f->nmatches == 0) {
+		snprintf(status, sizeof(status), "  no matches");
+	} else {
+		snprintf(status, sizeof(status), "  match %d of %d", f->cur + 1, f->nmatches);
+	}
+	be_drawDialogTextRow(sb, x, y + 2, inner, S_DIM, status);
+
+	/* Bottom border, key hints baked in like the other dialogs' footers. */
+	be_moveCursor(sb, x, y + 3);
+	sb_append(sb, "\x1b[" S_DIM "m" B_BL B_H);
+	const char *btm_msg = "\xe2\x86\x91\xe2\x86\x93 seek \xc2\xb7 \xe2\x8f\x8e keep \xc2\xb7 esc cancel";
+	sb_append(sb, btm_msg);
+	for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
+	sb_append(sb, B_BR S_RESET);
+
+}
+
+/* Find: match-highlight rendering helpers */
+/* Is render-column `rx` on `filerow` inside a find match? Returns the
+ * match index, or -1. Byte columns are converted through be_calculateRx()
+ * so highlighting still lines up on rows containing tabs.
+ *
+ * Linear scan over every match -- fine at editor scale (the match list is
+ * already bounded by how many hits a rescan found), and simpler than
+ * indexing matches per-row for what is, so far, a single-file feature. */
+static int be_findMatchAt(int filerow, int rx) {
+	BE_Find *f = &state.find;
+	for (int i = 0; i < f->nmatches; i++) {
+		BE_Match *m = &f->matches[i];
+		if (m->row != filerow) continue;
+		int start = be_calculateRx(&state.row[filerow], m->col);
+		int end   = be_calculateRx(&state.row[filerow], m->col + f->inputlen);
+		if (rx >= start && rx < end) return i;
+	}
+	return -1;
+}
+
+/* Emits one row's visible text broken into color-tagged spans wherever a
+ * find match falls. Only called for rows that actually have a match --
+ * see be_drawRows(). */
+void be_drawRowWithMatches(StringBuilder *sb, int filerow, int coloff, int len) {
+	const char *render = state.row[filerow].render;
+	bool in_match = false;
+	int  cur_match = -1;
+	for (int i = 0; i < len; i++) {
+		int rx = coloff + i;
+		int m  = be_findMatchAt(filerow, rx);
+		bool want = (m >= 0);
+		if (want != in_match || (want && m != cur_match)) {
+			if (want)
+				sb_append(sb, m == state.find.cur
+				          ? "\x1b[48;5;58m\x1b[38;5;230m"   /* current match */
+				          : "\x1b[48;5;238m\x1b[39m");      /* other matches */
+			else
+				sb_append(sb, "\x1b[0m");
+			in_match = want;
+			cur_match = m;
+		}
+		sb_appendn(sb, &render[rx], 1);
+	}
+	if (in_match) sb_append(sb, "\x1b[0m");
+}
+
 
 void be_drawPalette(StringBuilder *sb, int *cur_x, int *cur_y) {
 	BE_CmdPalette *p = &state.pal;
@@ -1802,6 +2094,48 @@ void processGotoDialogKeypress(int c) {
 
 }
 
+
+void processFindKeypress(int c) {
+	BE_Find *f = &state.find;
+	switch (c) {
+		case '\x1b':
+			be_findClose(false);
+			return;
+		case '\r':
+			be_findClose(true);
+			return;
+		/* ArrowDown/Up step through matches rather than moving the caret --
+		 * a one-line field has no use for vertical motion. Ctrl+F doubles
+		 * as "next match" while the popup already has focus. */
+		case CTRL_KEY('f'):
+		case ARROW_DOWN:
+			be_findNext();
+			return;
+		case ARROW_UP:
+			be_findPrev();
+			return;
+
+		case BACKSPACE:
+		case CTRL_BACKSPACE:
+			if (f->inputlen > 0) {
+				f->input[--f->inputlen] = '\0';
+				be_findRebuildMatches();
+				be_findSeekFromSaved();
+			}
+			return;
+	}
+
+	int before = f->inputlen;
+	if (c >= 32 && c < 127 && f->inputlen < MAX_INPUT_SIZE) {
+		f->input[f->inputlen++] = (char)c;
+		f->input[f->inputlen] = '\0';
+		if (f->inputlen != before) {
+			be_findRebuildMatches();
+			be_findSeekFromSaved();
+		}
+	}
+}
+
 void processPaletteKeypress(int c) {
 	BE_CmdPalette *p = &state.pal;
 	switch (c) {
@@ -1899,6 +2233,11 @@ void be_processKeypress() {
 		return;
 	}
 
+	if (state.find.active) {
+		processFindKeypress(c);
+		return;
+	}
+
 	if (state.pal.open) {
 		processPaletteKeypress(c);
 		return;
@@ -1931,6 +2270,10 @@ void be_processKeypress() {
 
 		case CTRL_KEY('p'):
 			be_paletteOpen();
+			break;
+
+		case CTRL_KEY('f'):
+			be_findOpen();
 			break;
 
 		// HOME/END move within the current line; CTRL_HOME/CTRL_END jump
@@ -2382,6 +2725,15 @@ void be_refreshScreen() {
 			sb_append(&sb, buf);
 			sb_append(&sb, "\x1b[?25h");
 		}
+	}
+
+	if (state.find.active) {
+		int find_x, find_y;
+		be_drawFindBar(&sb, &find_x, &find_y);
+		char buf[32];
+		snprintf(buf, sizeof(buf), "\x1b[%d;%dH", find_y + 1, find_x + 1);
+		sb_append(&sb, buf);
+		sb_append(&sb, "\x1b[?25h");
 	}
 
 	if (state.pal.open) {

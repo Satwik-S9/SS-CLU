@@ -11,11 +11,11 @@
 - [x] Enable Open & Goto Dialog boxes
 - [x] Enable readline like editing in the editor | i.e. use a line struct
 - [x] Add Ctrl+A, Ctrl+E, Alt+A, Alt+E
-- [ ] Enable find functionality for the editor
-- [ ] Add mouse capability to the editor
-- [ ] Ctrl+O Shows file in directory under a scrolling window
+- [x] Ctrl+O Shows first few files/folders in directory under (Non Interactive)
+- [x] Enable find functionality for the editor
 - [ ] Unify some interfaces
 - [ ] Port all configuration to config.h file
+- [ ] Add mouse capability to the editor -- Only Scrolling (main editor) and Click moves the cursor and presses buttons
 
 
 # Planned Features
