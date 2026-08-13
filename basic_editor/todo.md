@@ -10,9 +10,10 @@
 - [x] Make command pallete and also have a switch theme functionality for it 
 - [x] Enable Open & Goto Dialog boxes
 - [x] Enable readline like editing in the editor | i.e. use a line struct
-- [ ] Add Ctrl+A, Ctrl+E, Alt+A, Alt+E
+- [x] Add Ctrl+A, Ctrl+E, Alt+A, Alt+E
 - [ ] Enable find functionality for the editor
 - [ ] Add mouse capability to the editor
+- [ ] Ctrl+O Shows file in directory under a scrolling window
 - [ ] Unify some interfaces
 - [ ] Port all configuration to config.h file
 

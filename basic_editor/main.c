@@ -115,6 +115,8 @@ typedef enum {
 typedef enum {
 	// Keys present in ASCII
 	BACKSPACE = 0x7f,
+    CTRL_BACKSPACE = 0x08,
+
     // Other Keys
     ARROW_LEFT  = 1000,
 	ARROW_RIGHT,
@@ -130,14 +132,10 @@ typedef enum {
 	WORD_DELETE,
 	WORD_RIGHT,
 	WORD_LEFT,
-	// NOTE: CTRL_BACKSPACE must NOT be 0x08 — that value is the literal
-	// ASCII byte for Ctrl+H, which the raw single-byte read path already
-	// returns directly (and the keypress switch already treats as plain
-	// Backspace). Giving CTRL_BACKSPACE the same value made it dead: it
-	// could never appear as its own case without colliding with CTRL_KEY('h').
-	CTRL_BACKSPACE,
 
 	CTRL_SHIFT_S,
+    ALT_A,
+    ALT_E
 } BE_Key;
 
 
@@ -251,8 +249,6 @@ typedef enum {
 	CMD_GTST,
 	CMD_GTEN,
 	CMD_FIND,
-	CMD_REPLACE,
-	CMD_SHOWKEY
 } PaletteCmdType;
 
 typedef struct {
@@ -263,15 +259,13 @@ typedef struct {
 
 static const BE_Command commands[] = {
 	{ CMD_SAVE, 	"save file",			"^S" },
-	{ CMD_SAVEAS, 	"write file as",		"^W" },
+	{ CMD_SAVEAS, 	"write file as",		"^⇧ S" },
 	{ CMD_OPEN, 	"open file",			"^O" },
 	{ CMD_QUIT, 	"quit", 				"^Q" },
 	{ CMD_GOTO, 	"go to line", 			"^G" },
 	{ CMD_GTST, 	"go to start of file",	"^Home" },
 	{ CMD_GTEN, 	"go to end of file",    "^End" },
-	{ CMD_FIND, 		"find in file", 		"^F" },
-	{ CMD_REPLACE, 	"find and replace",     "^R" },
-	{ CMD_SHOWKEY,	"show keymaps",         "^." },
+	{ CMD_FIND, 	"find in file", 		"^F" },
 };
 
 #define NCOMMANDS ((int)(sizeof(commands) / sizeof(commands[0])))
@@ -552,8 +546,8 @@ static void be_paletteClose() {
 static void be_paletteExecuteCmd(void) {
 	BE_CmdPalette *p = &state.pal;
 
-	if (p->sel >= NCOMMANDS || p->sel < 0) return;
-	BE_Command cmd = commands[p->sel];
+	if (p->nfiltered == 0 || p->sel < 0 || p->sel >= p->nfiltered) return;
+	BE_Command cmd = commands[p->filtered[p->sel]];
 	size_t outlen;
 	bool ok;
 	char msg[80];
@@ -592,6 +586,7 @@ static void be_paletteExecuteCmd(void) {
 		case CMD_OPEN:
 			be_paletteClose();
 			// Open File Dialog;
+            be_openDialog_open(&state.open_dialog);
 			return;
 		
 		case CMD_QUIT:
@@ -608,9 +603,9 @@ static void be_paletteExecuteCmd(void) {
 				return;
 			}
 
-			// Goto line dialog
+			be_gotoDialog_open(&state.goto_dialog);
 			return;
-		
+
 		case CMD_GTST:
 			be_paletteClose();
 			// Do not execute when on homepage
@@ -619,9 +614,10 @@ static void be_paletteExecuteCmd(void) {
 				state.statusmsg_time = time(NULL);
 				return;
 			}
-			// Handle like CTRL_HOME;
+			state.cur_x = 0;
+			state.cur_y = state.def_y;
 			return;
-		
+
 		case CMD_GTEN:
 			be_paletteClose();
 			// Do not execute when on homepage
@@ -630,33 +626,13 @@ static void be_paletteExecuteCmd(void) {
 				state.statusmsg_time = time(NULL);
 				return;
 			}
-			// Handle like CTRL_END;
+			state.cur_y = state.numrows ? state.numrows - 1 : 0;
+			state.cur_x = state.numrows ? state.row[state.cur_y].size : 0;
 			return;
 
 		case CMD_FIND:
 			be_paletteClose();
-			// Do not execute when on homepage
-			if (state.mode == SPLASH) {
-				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
-				state.statusmsg_time = time(NULL);
-				return;
-			}
-			// Handle Finding
-			return;
-
-		case CMD_REPLACE:
-			be_paletteClose();
-			// Do not execute when on homepage
-			if (state.mode == SPLASH) {
-				snprintf(state.statusmsg, sizeof(state.statusmsg), "{X} Action not allowed on homepage");
-				state.statusmsg_time = time(NULL);
-				return;
-			}
-			// Handle Finding & Replacing
-			return;
-		case CMD_SHOWKEY:
-			be_paletteClose();
-			// Draw Cheatsheet
+			be_setStatusMsg("{X} Find is not implemented yet");
 			return;
 	}
 }
@@ -722,12 +698,42 @@ void be_die(const char *s) {
     exit(1);
 }
 
+/* Sends an escape sequence to the terminal. Inside tmux, wraps it in tmux's
+ * DCS passthrough syntax (doubling any embedded ESC bytes, per the tmux(1)
+ * spec) so it reaches the real terminal underneath instead of being
+ * swallowed or misparsed by tmux's own escape handling — tmux does not
+ * reliably forward private CSI sequences like the Kitty protocol's "\x1b[>1u"
+ * on its own. This only fixes the outbound half of the round trip: for the
+ * resulting key reports to make it back in, the user's tmux.conf also needs
+ * `set -g allow-passthrough on` and `set -g extended-keys on` — neither can
+ * be set from inside a client application, so terminals without that config
+ * silently keep behaving as if the protocol was never enabled. */
+static void be_writeTermSeq(const char *seq, size_t len) {
+    if (getenv("TMUX") == NULL) {
+        if (write(STDOUT_FILENO, seq, len) != (ssize_t)len) { /* best effort */ }
+        return;
+    }
+
+    char buf[64];
+    size_t n = 0;
+    const char *prefix = "\x1bPtmux;";
+    for (const char *p = prefix; *p && n < sizeof(buf); p++) buf[n++] = *p;
+    for (size_t i = 0; i < len && n + 2 <= sizeof(buf); i++) {
+        if (seq[i] == '\x1b' && n < sizeof(buf)) buf[n++] = '\x1b';
+        buf[n++] = seq[i];
+    }
+    const char *suffix = "\x1b\\";
+    for (const char *p = suffix; *p && n < sizeof(buf); p++) buf[n++] = *p;
+
+    if (write(STDOUT_FILENO, buf, n) != (ssize_t)n) { /* best effort */ }
+}
+
 void be_disableRawMode(void) {
     /* Pop the keyboard protocol enhancement pushed in be_enableRawMode():
      * leaving it on would change how keys are reported for whatever the
      * user's shell runs next. Terminals that never understood the push
      * ignore the pop the same harmless way. */
-    if (write(STDOUT_FILENO, "\x1b[<u", 4) != 4) { /* best effort */ }
+    be_writeTermSeq("\x1b[<u", 4);
     /* Cursor visibility is terminal-global and outlives the process: if we
      * exit while hidden, the user's shell inherits an invisible cursor. */
     if (write(STDOUT_FILENO, "\x1b[?25h", 6) != 6) { /* best effort */ }
@@ -759,7 +765,7 @@ void be_enableRawMode(void) {
      * the protocol start reporting Ctrl+Shift+<letter> (and a few other
      * otherwise-ambiguous keys) as distinct CSI sequences; terminals that
      * don't recognize this escape simply ignore it and nothing changes. */
-    if (write(STDOUT_FILENO, "\x1b[>1u", 5) != 5) { /* best effort */ }
+    be_writeTermSeq("\x1b[>1u", 5);
 }
 
 int be_readKey() {
@@ -802,6 +808,8 @@ int be_readKey() {
             case 'f': return WORD_RIGHT;
             case 0x7f:
             case 0x08: return CTRL_BACKSPACE;
+            case 'a':  return ALT_A;
+            case 'e':  return ALT_E;
         }
         return '\x1b';
     }
@@ -1698,7 +1706,7 @@ void processOpenDialogKeypress(int c) {
 			return;
 
 		case BACKSPACE:
-		case CTRL_KEY('h'):
+		case CTRL_BACKSPACE:
 			if (od->focus == OD_FOCUS_INPUT && od->inputlen > 0) {
 				od->input_path[--od->inputlen] = '\0';
 			}
@@ -1764,7 +1772,7 @@ void processGotoDialogKeypress(int c) {
 			return;
 
 		case BACKSPACE:
-		case CTRL_KEY('h'):
+		case CTRL_BACKSPACE:
 			if (gd->focus == GD_FOCUS_INPUT && gd->inputlen > 0) {
 				gd->input[--gd->inputlen] = '\0';
 			}
@@ -1827,7 +1835,7 @@ void processPaletteKeypress(int c) {
 
 
 		case BACKSPACE:
-		case CTRL_KEY('h'):
+		case CTRL_BACKSPACE:
 			if (p->qlen > 0) {
 				p->query[--p->qlen] = '\0';
 				p->sel = 0;
@@ -1914,16 +1922,6 @@ void be_processKeypress() {
 			be_quitEditor();
 			break;
 
-		case CTRL_KEY('t'):
-            state.cur_x = 0;
-            state.cur_y = 0;
-            break;
-
-		case CTRL_KEY('e'):
-			state.cur_y = state.numrows ? state.numrows - 1 : 0;
-            state.cur_x = state.numrows ? state.row[state.cur_y].size : 0;
-            break;
-
 		case CTRL_KEY('s'):
 			be_saveFile(NULL);
 			break;
@@ -1946,24 +1944,29 @@ void be_processKeypress() {
 
 		// HOME/END move within the current line; CTRL_HOME/CTRL_END jump
 		// to the start/end of the whole document.
+        case ALT_A:
 		case HOME:
 			state.cur_x = 0;
 			break;
+
+        case ALT_E:
 		case END:
 			if (state.cur_y < state.numrows) state.cur_x = state.row[state.cur_y].size;
 			break;
 
+        case CTRL_KEY('a'):
 	    case CTRL_HOME:
 		    state.cur_x = 0;
 			state.cur_y = state.def_y;
 		    break;
+
+        case CTRL_KEY('e'):
 		case CTRL_END:
 			state.cur_y = state.numrows ? state.numrows - 1 : 0;
 			state.cur_x = state.numrows ? state.row[state.cur_y].size : 0;
 		    break;
 
 		case BACKSPACE:
-		case CTRL_KEY('h'):
 		case DELETE:
             if (c == DELETE) be_handleArrowKeys(ARROW_RIGHT);
             be_deleteChar();
