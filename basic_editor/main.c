@@ -698,16 +698,7 @@ void be_die(const char *s) {
     exit(1);
 }
 
-/* Sends an escape sequence to the terminal. Inside tmux, wraps it in tmux's
- * DCS passthrough syntax (doubling any embedded ESC bytes, per the tmux(1)
- * spec) so it reaches the real terminal underneath instead of being
- * swallowed or misparsed by tmux's own escape handling — tmux does not
- * reliably forward private CSI sequences like the Kitty protocol's "\x1b[>1u"
- * on its own. This only fixes the outbound half of the round trip: for the
- * resulting key reports to make it back in, the user's tmux.conf also needs
- * `set -g allow-passthrough on` and `set -g extended-keys on` — neither can
- * be set from inside a client application, so terminals without that config
- * silently keep behaving as if the protocol was never enabled. */
+/* NOTE this still is not working perfectly. This needs to be checked and fixed for tmux */
 static void be_writeTermSeq(const char *seq, size_t len) {
     if (getenv("TMUX") == NULL) {
         if (write(STDOUT_FILENO, seq, len) != (ssize_t)len) { /* best effort */ }
