@@ -16,10 +16,10 @@
 #include <fcntl.h>
 #include <dirent.h>
 
+#include "be.h"
 #include "config.h"
 
 /* Defines */
-
 #define _BSD_SOURCE
 #define _GNU_SOURCE
 
@@ -44,23 +44,6 @@
 #define B_RT "┤"
 
 #define MAX_SPANS 6
-
-// Highlights for Homepage :: To be moved to a separate config file
-#ifdef LIGHT_THEME_MODE
-	#define S_KEY  "38;2;150;150;150"
-	#define S_TEXT "38;2;166;166;166"
-#endif
-
-#ifdef DARK_THEME_MODE
-	#define S_KEY    "1;38;5;252"
-	#define S_TEXT   "38;5;250"
-#endif
-
-#define S_DIM    "38;5;240"
-#define S_ACCENT "38;2;133;153;0"
-#define S_ERROR  "38;2;220;50;47"
-#define S_FILE 	 "38;2;114;114;114"
-#define S_RESET  "\x1b[0m"
 
 /** Palette Highlights **/
 #ifdef LIGHT_THEME_MODE
@@ -95,7 +78,6 @@
 
 // Load Statusbar theme
 static struct StatusBar_Theme sb_theme = { STATUS_BAR_BACKGROUND, STATUS_BAR_FOREGROUND};
-
 /* Data Models */
 
 /** Generic Data Models **/
@@ -119,9 +101,8 @@ typedef enum {
 typedef enum {
 	// Keys present in ASCII
 	BACKSPACE = 0x7f,
-    CTRL_BACKSPACE = 0x08,
 
-    // Other Keys
+    // Nav Keys
     ARROW_LEFT  = 1000,
 	ARROW_RIGHT,
 	ARROW_DOWN,
@@ -136,12 +117,23 @@ typedef enum {
 	WORD_DELETE,
 	WORD_RIGHT,
 	WORD_LEFT,
+	// NOTE: CTRL_BACKSPACE must NOT be 0x08 -- that's the literal ASCII
+	// byte for Ctrl+H, which collides with CTRL_KEY('h') and makes
+	// CTRL_BACKSPACE unusable as its own switch case anywhere both are
+	// handled (e.g. alongside a dialog's plain-Backspace case).
+	CTRL_BACKSPACE,
 
+	// Special Mod Keys
 	CTRL_SHIFT_S,
     ALT_A,
-    ALT_E
-} BE_Key;
+    ALT_E,
 
+	// Mouse Clicks
+	M_LEFT_CLICK,
+	M_OTHER_CLICK,
+	M_SCROLL_UP,
+	M_SCROLL_DOWN
+} BE_Key;
 
 typedef enum {
 	AL_CENTER,
@@ -199,11 +191,15 @@ typedef enum {
 } BE_SaveDialogFocus;
 
 typedef struct {
+	int					cursor; // Basically Stores the x offset
     bool   				active;
 	bool   				quit_on_save;
 	BE_SaveDialogFocus 	focus;
     char   				input_path[MAX_INPUT_SIZE + 1];
-	size_t 				inputlen;
+	// int, not size_t: cursor arithmetic below (inputlen + cursor, where
+	// cursor can be negative) needs signed math -- mixing size_t with a
+	// negative int silently promotes to a huge unsigned value instead.
+	int 				inputlen;
 } BE_SaveDialog;
 
 /* Open Dialog Box Structures */
@@ -215,11 +211,13 @@ typedef enum {
 } BE_OpenDialogFocus;
 
 typedef struct {
+	int 				cursor;
 	bool 				active;
 	bool 				create_file;
 	BE_OpenDialogFocus 	focus;
 	char 				input_path[MAX_INPUT_SIZE + 1];
-	size_t				inputlen;
+	// int, not size_t -- see BE_SaveDialog.inputlen for why.
+	int					inputlen;
 } BE_OpenDialog;
 
 typedef enum {
@@ -231,6 +229,7 @@ typedef enum {
 
 typedef struct {
 	BE_GotoDialogFocus focus;
+	int  cursor;
 	bool active;
 	int  inputlen;
 	char input[32];
@@ -250,6 +249,7 @@ typedef struct { int row, col; } BE_Match;   /* col = byte index into row->data 
 
 typedef struct {
 	bool 		active;
+	int			cursor;
 	int  		inputlen;
 	int 		nmatches;
 	int			cur;
@@ -277,7 +277,7 @@ typedef struct {
 
 static const BE_Command commands[] = {
 	{ CMD_SAVE, 	"save file",			"^S" },
-	{ CMD_SAVEAS, 	"write file as",		"^⇧ S" },
+	{ CMD_SAVEAS, 	"save file as",		"^⇧ S" },
 	{ CMD_OPEN, 	"open file",			"^O" },
 	{ CMD_QUIT, 	"quit", 				"^Q" },
 	{ CMD_GOTO, 	"go to line", 			"^G" },
@@ -291,6 +291,7 @@ static const BE_Command commands[] = {
 typedef struct {
 	bool open;
 	char query[MAX_INPUT_SIZE + 1];
+	int  cursor;
 	int  qlen;
 	int  max_rows;
 	int  sel;
@@ -298,9 +299,22 @@ typedef struct {
 	int  filtered[NCOMMANDS];
 } BE_CmdPalette;
 
+/* Modes:
+* 0: Left Click,
+* 2: Right Click, 
+* 64: Scroll Up, 
+* 65: Scroll Dowm 
+* */
+typedef struct { 
+	int 	sx, sy;
+	int 	ex, ey;
+	int 	mode;
+} BE_MouseEvent;
+
 typedef struct {
 	int    			def_x, def_y;
 	int    			cur_x, cur_y;
+	int				loc_x, loc_y;
 	int     		row_x;
 	int    			rowoff;
 	int 			coloff;
@@ -309,6 +323,7 @@ typedef struct {
 	int    			numrows;
 	int	    		dirty;
 	BE_Mode			mode;
+	BE_MouseEvent	mouse;
 	BE_GotoDialog   goto_dialog;
 	BE_OpenDialog	open_dialog;
     BE_SaveDialog 	save_dialog;
@@ -411,13 +426,14 @@ void be_saveDialog_open(BE_SaveDialog *sd) {
     sd->active = true;
 	sd->focus = SD_FOCUS_INPUT;
 	sd->quit_on_save = false;
+	sd->cursor = 0;   // 0 always means "at the end", regardless of inputlen
 
 	// Pre-fill the input bar with the current filename, if any, so
 	// re-saving an already-named file doesn't require retyping it.
 	if (state.filename != NULL) {
 		strncpy(sd->input_path, state.filename, MAX_INPUT_SIZE);
 		sd->input_path[MAX_INPUT_SIZE] = '\0';
-		sd->inputlen = strlen(sd->input_path);
+		sd->inputlen = (int)strlen(sd->input_path);
 	} else {
 		sd->input_path[0] = '\0';
 		sd->inputlen = 0;
@@ -429,6 +445,7 @@ void be_saveDialog_close(BE_SaveDialog *sd) {
     sd->active = false;
 	sd->focus = SD_FOCUS_INPUT;
 	sd->inputlen = 0;
+	sd->cursor = 0;
 	sd->input_path[0] = '\0';
 	sd->quit_on_save = false;
 }
@@ -441,10 +458,11 @@ void be_openDialog_open(BE_OpenDialog *od) {
 		be_setStatusMsg("Please save the file first");
 		return;
 	}
-	
+
 	od->active = true;
 	od->focus = OD_FOCUS_INPUT;
 	od->inputlen = 0;
+	od->cursor = 0;
 	od->input_path[0] = '\0';
 }
 
@@ -452,6 +470,7 @@ void be_openDialog_close(BE_OpenDialog *od) {
 	od->active = false;
 	od->focus = OD_FOCUS_INPUT;
 	od->inputlen = 0;
+	od->cursor = 0;
 	od->input_path[0] = '\0';
 }
 
@@ -607,6 +626,7 @@ void be_findOpen(void) {
 	BE_Find *f = &state.find;
 	f->active = true;
 	f->inputlen = 0;
+	f->cursor = 0;   // stale cursor from a previous find session must not carry over
 	f->input[0] = '\0';
 
 	f->saved_cur_x  = state.cur_x;
@@ -658,6 +678,7 @@ static void be_paletteRefilter() {
 static void be_paletteOpen(void) {
 	BE_CmdPalette *p = &state.pal;
 	p->open = true;
+	p->cursor = 0;
 	p->qlen = 0;
 	p->query[0] = '\0';
 	p->sel = 0;
@@ -908,12 +929,12 @@ int be_readKey() {
     if (ch == 'O') {
             if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
             switch (ch) {
-            case 'H': return HOME;
-            case 'F': return END;
-            case 'A': return ARROW_UP;
-            case 'B': return ARROW_DOWN;
-            case 'C': return ARROW_RIGHT;
-            case 'D': return ARROW_LEFT;
+				case 'H': return HOME;
+				case 'F': return END;
+				case 'A': return ARROW_UP;
+				case 'B': return ARROW_DOWN;
+				case 'C': return ARROW_RIGHT;
+				case 'D': return ARROW_LEFT;
             }
             return '\x1b';
     }
@@ -951,6 +972,42 @@ int be_readKey() {
     }
     seq[n] = '\0';
     if (final == 0) return '\x1b';
+
+	if (seq[0] == '<') {
+		/* SGR mouse report: "<Cb;Cx;Cy" followed by a final byte of 'M'
+		 * (button press / wheel notch) or 'm' (button release). Press and
+		 * release always arrive as two independent escape sequences -- two
+		 * separate calls to be_readKey() -- never both in the same call.
+		 * The previous code tried to reconcile mode1 (only ever set by the
+		 * 'M' branch) against mode2 (only ever set by the 'm' branch)
+		 * within a single call, but exactly one of them was always still
+		 * sitting at its -1 sentinel default -- so a press always resolved
+		 * to "unknown" (mode -1) and fell to the default: M_OTHER_CLICK,
+		 * which has no case in the keypress switch and dropped straight
+		 * into be_editorInsertChar(), inserting a garbage byte into the
+		 * document on every single click. */
+		char t;
+		int mode = 0;
+		sscanf(seq, "%c%d;%d;%d", &t, &mode, &state.mouse.ex, &state.mouse.ey);
+		state.mouse.mode = mode;
+
+		/* A plain click doesn't need release semantics -- there's no
+		 * drag/selection to track -- so only button-down/wheel ('M') is
+		 * actionable. Button-up ('m') is consumed here and discarded
+		 * instead of being handed back as if it were a key. */
+		if (final != 'M') return be_readKey();
+
+		switch (mode) {
+			case 0:
+				return M_LEFT_CLICK;
+			case 64:
+				return M_SCROLL_UP;
+			case 65:
+				return M_SCROLL_DOWN;
+			default:
+				return M_OTHER_CLICK;
+		}
+	}
 
     int p1 = 1, p2 = 1;
     sscanf(seq, "%d;%d", &p1, &p2);
@@ -1341,9 +1398,11 @@ void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
     for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
     sb_append(sb, B_BR S_RESET);
 
-	// Land the caret right after the typed text inside the box: border(1)
-	// + " [ "(3) = 4 cells in, then past whatever's typed so far.
-	*cur_x = x + 4 + (int)sd->inputlen;
+	// Land the caret at the actual cursor position, not always at the end
+	// of the typed text: border(1) + " [ "(3) = 4 cells in, then however
+	// far the cursor currently sits (inputlen + cursor, since cursor is a
+	// <=0 offset from the end).
+	*cur_x = x + 4 + (int)(sd->inputlen + sd->cursor);
 	*cur_y = y + 6;
 }
 
@@ -1457,7 +1516,9 @@ void be_drawOpenDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
     for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
     sb_append(sb, B_BR S_RESET);
 
-	*cur_x = x + 4 + (int)od->inputlen;
+	// Land the caret at the actual cursor position -- see be_drawSaveDialog
+	// for why this isn't just inputlen.
+	*cur_x = x + 4 + (int)(od->inputlen + od->cursor);
 	*cur_y = y + 5;
 
 	free(contents);
@@ -1557,7 +1618,10 @@ void be_drawFindBar(StringBuilder *sb, int *cur_x, int *cur_y) {
 	/* Input row */
 	int field_w = inner - 3;
 	if (field_w < 1) field_w = 1;
-	int caret_col = f->inputlen;
+	// Actual cursor position, not always the end -- now that ARROW_LEFT/
+	// RIGHT and friends can move f->cursor around within the query, the
+	// caret needs to follow it instead of staying pinned to the end.
+	int caret_col = f->inputlen + f->cursor;
 
 	be_moveCursor(sb, x, y + 1);
 	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
@@ -1689,6 +1753,7 @@ void be_drawPalette(StringBuilder *sb, int *cur_x, int *cur_y) {
 	sb_repeat(sb, B_H, inner);
 	sb_append(sb, B_RT PAL_RESET);
 
+	// TODO: Add logic here so that we can use p->cursor
 	*cur_x = x + 4 + qshow;
 	*cur_y = y + 1;
 
@@ -1830,7 +1895,69 @@ void line_delete_to_end() {
 }
 
 
+/* True on-screen width of a row */
+static int be_rowVisualWidth(BE_Row *row) {
+	int rx = 0;
+	for (int j = 0; j < row->size; j++) {
+		if (row->data[j] == '\t') {
+			rx += DEFAULT_TAB_SIZE - (rx % DEFAULT_TAB_SIZE);
+		} else if (((unsigned char)row->data[j] & 0xC0) != 0x80) {
+			rx++;   // count only the leading byte of each UTF-8 codepoint
+		}
+	}
+	return rx;
+}
+
 /* Input Processing */
+static void be_scrollView(int delta) {
+	int maxoff = (state.numrows > state.screenrows) ? state.numrows - state.screenrows : 0;
+	state.rowoff += delta;
+	if (state.rowoff < 0) state.rowoff = 0;
+	if (state.rowoff > maxoff) state.rowoff = maxoff;
+
+	if (state.cur_y < state.rowoff) state.cur_y = state.rowoff;
+	if (state.cur_y >= state.rowoff + state.screenrows) state.cur_y = state.rowoff + state.screenrows - 1;
+	if (state.cur_y >= state.numrows) state.cur_y = state.numrows ? state.numrows - 1 : 0;
+	if (state.cur_y < 0) state.cur_y = 0;
+
+	int rowlen = (state.cur_y < state.numrows) ? state.row[state.cur_y].size : 0;
+	if (state.cur_x > rowlen) state.cur_x = rowlen;
+}
+
+void be_handleMouseScroll(int key) {
+	switch (key) {
+		case M_SCROLL_UP:
+			be_scrollView(-MOUSE_SCROLL_DELTA);
+			return;
+		case M_SCROLL_DOWN:
+			be_scrollView(MOUSE_SCROLL_DELTA);
+			return;
+		default:
+			return;
+	}
+}
+
+void be_handleMouseKeys(int key) {
+	BE_Row *row;
+	int my = 0, mx = 0;
+	switch (key) {
+		case M_LEFT_CLICK:
+			my = state.mouse.ey - 1 + state.rowoff;
+			if (my >= 0 && my < state.numrows) {
+				row = &state.row[my];
+				mx = state.mouse.ex - 1 - state.def_x + state.coloff;
+
+				if (mx > be_rowVisualWidth(row)) mx = row->size;
+				if (mx < 0) mx = 0;   // clicked on/left of the gutter
+				state.cur_x = mx;
+				state.cur_y = my;
+			}
+			return;
+
+		default:
+			return;
+	}
+}
 void be_handleArrowKeys(int key) {
 	int lastrow = state.numrows ? state.numrows - 1 : 0;
 	BE_Row *row = (state.cur_y >= state.numrows) ? NULL : &state.row[state.cur_y];
@@ -1904,7 +2031,8 @@ void processSaveDialogKeypress(int c) {
 			sd->focus = (sd->focus + 1) % SD_FOCUS_COUNT;
 			return;
 
-		// Left/Right also walk the button bar, once a button has focus.
+		// Left/Right move the text cursor once the input has focus; on a
+		// button they still walk the button bar as before.
 		case ARROW_LEFT:
 		case ARROW_RIGHT:
 			if (sd->focus != SD_FOCUS_INPUT) {
@@ -1912,19 +2040,71 @@ void processSaveDialogKeypress(int c) {
 				int dir = (c == ARROW_RIGHT) ? 1 : -1;
 				btn = (btn + dir + 3) % 3;
 				sd->focus = SD_FOCUS_SAVE + btn;
+			} else if (c == ARROW_LEFT) {
+				if (sd->cursor > -sd->inputlen) sd->cursor--;
+			} else {
+				if (sd->cursor < 0) sd->cursor++;
 			}
+			return;
+
+		case HOME:
+			if (sd->focus == SD_FOCUS_INPUT) sd->cursor = -sd->inputlen;
+			return;
+
+		case END:
+			if (sd->focus == SD_FOCUS_INPUT) sd->cursor = 0;
 			return;
 
 		case BACKSPACE:
 		case CTRL_KEY('h'):
-			if (sd->focus == SD_FOCUS_INPUT && sd->inputlen > 0) {
+			if (sd->focus == SD_FOCUS_INPUT) {
+				int at = sd->inputlen + sd->cursor - 1;
+				if (at < 0) return;
+				memmove(&sd->input_path[at], &sd->input_path[at+1], -sd->cursor + 1);
 				sd->input_path[--sd->inputlen] = '\0';
 			}
 			return;
 
-		// Enter performs whatever currently has focus: from the input bar
-		// that's Save (finish typing, then commit), from a button it's
-		// that button's action.
+		case WORD_LEFT:
+			if (sd->focus == SD_FOCUS_INPUT) {
+				int pos = sd->inputlen + sd->cursor - 1;
+				while (pos > 0 && !is_word_char(sd->input_path[pos])) pos--;
+				while (pos > 0 && is_word_char(sd->input_path[pos])) pos--;
+				sd->cursor = pos - sd->inputlen;
+				if (sd->cursor < -sd->inputlen) sd->cursor = -sd->inputlen;
+			}
+			return;
+
+		case WORD_RIGHT:
+			if (sd->focus == SD_FOCUS_INPUT) {
+				int pos = sd->inputlen + sd->cursor - 1;
+				while (pos < sd->inputlen && !is_word_char(sd->input_path[pos])) pos++;
+				while (pos < sd->inputlen && is_word_char(sd->input_path[pos])) pos++;
+				sd->cursor = pos - sd->inputlen + 1;
+				if (sd->cursor > 0) sd->cursor = 0;
+			}
+			return;
+
+		case CTRL_KEY('w'):
+		case CTRL_BACKSPACE:
+			if (sd->focus == SD_FOCUS_INPUT) {
+				int start = sd->inputlen + sd->cursor;
+				int end = sd->inputlen + sd->cursor - 1;
+				// Cursor already at the very start -> nothing before it to
+				// scan/delete. The while loops below only ever guard
+				// against going *below* 0, not against already starting
+				// there, and a negative `end` gets used as a memmove index.
+				if (end < 0) end = 0;
+				while (end > 0 && !is_word_char(sd->input_path[end])) end--;
+				while (end > 0 && is_word_char(sd->input_path[end])) end--;
+				memmove(&sd->input_path[end], &sd->input_path[start], sd->inputlen - start);
+				sd->inputlen -= (start - end);
+				sd->input_path[sd->inputlen] = '\0';
+				sd->cursor = end - sd->inputlen;
+				if (sd->cursor < -sd->inputlen) sd->cursor = -sd->inputlen;
+			}
+			return;
+
 		case '\r':
 			switch (sd->focus) {
 				case SD_FOCUS_INPUT:
@@ -1943,8 +2123,11 @@ void processSaveDialogKeypress(int c) {
 
 	if (sd->focus == SD_FOCUS_INPUT) {
 		if (c >= 32 && c < 127 && sd->inputlen < MAX_INPUT_SIZE) {
-			sd->input_path[sd->inputlen++] = (char)c;
-			sd->input_path[sd->inputlen] = '\0';
+			int at = sd->inputlen + sd->cursor;
+			if (at < 0) return;
+			memmove(&sd->input_path[at+1], &sd->input_path[at], -sd->cursor);
+			sd->input_path[at] = (char)c;
+			sd->input_path[++sd->inputlen] = '\0';
 		}
 		return;
 	}
@@ -1977,7 +2160,8 @@ void processOpenDialogKeypress(int c) {
 			od->focus = (od->focus + 1) % OD_FOCUS_COUNT;
 			return;
 
-		// Left/Right also walk the button bar, once a button has focus.
+		// Left/Right move the text cursor once the input has focus; on a
+		// button they still walk the button bar as before.
 		case ARROW_LEFT:
 		case ARROW_RIGHT:
 			if (od->focus != OD_FOCUS_INPUT) {
@@ -1985,19 +2169,67 @@ void processOpenDialogKeypress(int c) {
 				int dir = (c == ARROW_RIGHT) ? 1 : -1;
 				btn = (btn + dir + 2) % 2;
 				od->focus = OD_FOCUS_OPEN + btn;
+			} else if (c == ARROW_LEFT) {
+				if (od->cursor > -od->inputlen) od->cursor--;
+			} else {
+				if (od->cursor < 0) od->cursor++;
 			}
 			return;
 
+		case HOME:
+			if (od->focus == OD_FOCUS_INPUT) od->cursor = -od->inputlen;
+			return;
+
+		case END:
+			if (od->focus == OD_FOCUS_INPUT) od->cursor = 0;
+			return;
+
 		case BACKSPACE:
-		case CTRL_BACKSPACE:
-			if (od->focus == OD_FOCUS_INPUT && od->inputlen > 0) {
+			if (od->focus == OD_FOCUS_INPUT) {
+				int at = od->inputlen + od->cursor - 1;
+				if (at < 0) return;
+				memmove(&od->input_path[at], &od->input_path[at+1], -od->cursor + 1);
 				od->input_path[--od->inputlen] = '\0';
 			}
 			return;
 
-		// Enter performs whatever currently has focus: from the input bar
-		// that's Save (finish typing, then commit), from a button it's
-		// that button's action.
+		case WORD_LEFT:
+			if (od->focus == OD_FOCUS_INPUT) {
+				int pos = od->inputlen + od->cursor - 1;
+				while (pos > 0 && !is_word_char(od->input_path[pos])) pos--;
+				while (pos > 0 && is_word_char(od->input_path[pos])) pos--;
+				od->cursor = pos - od->inputlen;
+				if (od->cursor < -od->inputlen) od->cursor = -od->inputlen;
+			}
+			return;
+
+		case WORD_RIGHT:
+			if (od->focus == OD_FOCUS_INPUT) {
+				int pos = od->inputlen + od->cursor - 1;
+				while (pos < od->inputlen && !is_word_char(od->input_path[pos])) pos++;
+				while (pos < od->inputlen && is_word_char(od->input_path[pos])) pos++;
+				od->cursor = pos - od->inputlen + 1;
+				if (od->cursor > 0) od->cursor = 0;
+			}
+			return;
+
+		case CTRL_KEY('w'):
+		case CTRL_BACKSPACE:
+			if (od->focus == OD_FOCUS_INPUT) {
+				int start = od->inputlen + od->cursor;
+				int end = od->inputlen + od->cursor - 1;
+				// See the equivalent guard in processSaveDialogKeypress.
+				if (end < 0) end = 0;
+				while (end > 0 && !is_word_char(od->input_path[end])) end--;
+				while (end > 0 && is_word_char(od->input_path[end])) end--;
+				memmove(&od->input_path[end], &od->input_path[start], od->inputlen - start);
+				od->inputlen -= (start - end);
+				od->input_path[od->inputlen] = '\0';
+				od->cursor = end - od->inputlen;
+				if (od->cursor < -od->inputlen) od->cursor = -od->inputlen;
+			}
+			return;
+
 		case '\r':
 			switch (od->focus) {
 				case OD_FOCUS_INPUT:
@@ -2013,8 +2245,11 @@ void processOpenDialogKeypress(int c) {
 
 	if (od->focus == OD_FOCUS_INPUT) {
 		if (c >= 32 && c < 127 && od->inputlen < MAX_INPUT_SIZE) {
-			od->input_path[od->inputlen++] = (char)c;
-			od->input_path[od->inputlen] = '\0';
+			int at = od->inputlen + od->cursor;
+			if (at < 0) return;
+			memmove(&od->input_path[at+1], &od->input_path[at], -od->cursor);
+			od->input_path[at] = (char)c;
+			od->input_path[++od->inputlen] = '\0';
 		}
 		return;
 	}
@@ -2104,9 +2339,6 @@ void processFindKeypress(int c) {
 		case '\r':
 			be_findClose(true);
 			return;
-		/* ArrowDown/Up step through matches rather than moving the caret --
-		 * a one-line field has no use for vertical motion. Ctrl+F doubles
-		 * as "next match" while the popup already has focus. */
 		case CTRL_KEY('f'):
 		case ARROW_DOWN:
 			be_findNext();
@@ -2115,20 +2347,82 @@ void processFindKeypress(int c) {
 			be_findPrev();
 			return;
 
-		case BACKSPACE:
-		case CTRL_BACKSPACE:
-			if (f->inputlen > 0) {
-				f->input[--f->inputlen] = '\0';
-				be_findRebuildMatches();
-				be_findSeekFromSaved();
-			}
+		case ARROW_LEFT:
+			if (f->cursor > -f->inputlen) f->cursor--;
 			return;
+
+		case ARROW_RIGHT:
+			if (f->cursor < 0) f->cursor++;
+			return;
+
+		case END:
+			f->cursor = 0;
+			return;
+
+		case HOME:
+			f->cursor = -f->inputlen;
+			return;
+
+		case BACKSPACE:
+		{
+			int at = f->inputlen + f->cursor - 1;
+			if (at < 0) return;
+			memmove(&f->input[at], &f->input[at+1], -f->cursor + 1);
+			f->input[--f->inputlen] = '\0';
+			be_findRebuildMatches();
+			be_findSeekFromSaved();
+			return;
+		}
+
+		case WORD_RIGHT:
+		{
+			int pos = f->inputlen + f->cursor - 1;
+			while (pos < f->inputlen && !is_word_char(f->input[pos])) pos++;
+			while (pos < f->inputlen && is_word_char(f->input[pos])) pos++;
+			f->cursor = pos - f->inputlen + 1;
+			if (f->cursor > 0) f->cursor = 0;
+			return;
+		}
+
+		case WORD_LEFT:
+		{
+			int pos = f->inputlen + f->cursor - 1;
+			while (pos > 0 && !is_word_char(f->input[pos])) pos--;
+			while (pos > 0 && is_word_char(f->input[pos])) pos--;
+			f->cursor = pos - f->inputlen;
+			if (f->cursor < -f->inputlen) f->cursor = -f->inputlen;
+			return;
+		}
+
+		case CTRL_KEY('w'):
+		case CTRL_BACKSPACE:
+		{
+			int start = f->inputlen + f->cursor;
+			int end = f->inputlen + f->cursor - 1;
+			// Cursor already at the very start -> nothing before it to
+			// scan/delete; without this, a negative `end` reaches the
+			// memmove below as an out-of-bounds index.
+			if (end < 0) end = 0;
+			while (end > 0 && !is_word_char(f->input[end])) end--;
+			while (end > 0 && is_word_char(f->input[end])) end--;
+			memmove(&f->input[end], &f->input[start], f->inputlen - start);
+			f->inputlen -= (start-end);
+			f->input[f->inputlen] = 0;
+			f->cursor = end - f->inputlen;
+			if (f->cursor < -f->inputlen) f->cursor = -f->inputlen;
+			be_findRebuildMatches();
+			be_findSeekFromSaved();
+			return;
+		}
 	}
 
 	int before = f->inputlen;
 	if (c >= 32 && c < 127 && f->inputlen < MAX_INPUT_SIZE) {
-		f->input[f->inputlen++] = (char)c;
-		f->input[f->inputlen] = '\0';
+		int at = f->inputlen + f->cursor;
+		if (at < 0) return;
+		memmove(&f->input[at+1], &f->input[at], -f->cursor);
+		f->input[at] = (char)c;
+		f->input[++f->inputlen] = '\0';
 		if (f->inputlen != before) {
 			be_findRebuildMatches();
 			be_findSeekFromSaved();
@@ -2158,15 +2452,70 @@ void processPaletteKeypress(int c) {
 			if (p->sel < p->nfiltered - 1) p->sel++;
 			return;
 
+		case ARROW_LEFT:
+			if (p->cursor > -p->qlen) p->cursor--;
+			return;
+
+		case ARROW_RIGHT:
+			if (p->cursor < 0) p->cursor++;
+			return;
+
+		case END:
+			p->cursor = 0;
+			return;
+
+		case HOME:
+			p->cursor = -p->qlen;
+			return;
 
 		case BACKSPACE:
-		case CTRL_BACKSPACE:
-			if (p->qlen > 0) {
-				p->query[--p->qlen] = '\0';
-				p->sel = 0;
-				be_paletteRefilter();
-			}
+		{
+			int at = p->qlen + p->cursor - 1;
+			if (at < 0) return;
+			memmove(&p->query[at], &p->query[at+1], -p->cursor + 1);
+			p->query[--p->qlen] = '\0';
+			p->sel = 0;
+			be_paletteRefilter();
 			return;
+		}
+
+		case WORD_RIGHT:
+		{
+			int pos = p->qlen + p->cursor - 1;
+			while (pos < p->qlen && !is_word_char(p->query[pos])) pos++;
+			while (pos < p->qlen && is_word_char(p->query[pos])) pos++;
+			p->cursor = pos - p->qlen + 1;
+			if (p->cursor > 0) p->cursor = 0;
+			return;
+		}
+
+		case WORD_LEFT:
+		{
+			int pos = p->qlen + p->cursor - 1;
+			while (pos > 0 && !is_word_char(p->query[pos])) pos--;
+			while (pos > 0 && is_word_char(p->query[pos])) pos--;
+			p->cursor = pos - p->qlen;
+			if (p->cursor < -p->qlen) p->cursor = -p->qlen;
+			return;
+		}
+
+		case CTRL_KEY('w'):
+		case CTRL_BACKSPACE:
+		{
+			int start = p->qlen + p->cursor;
+			int end = p->qlen + p->cursor - 1;
+			// See the equivalent guard in processSaveDialogKeypress.
+			if (end < 0) end = 0;
+			while (end > 0 && !is_word_char(p->query[end])) end--;
+			while (end > 0 && is_word_char(p->query[end])) end--;
+			memmove(&p->query[end], &p->query[start], p->qlen - start);
+			p->qlen -= (start-end);
+			p->query[p->qlen] = 0;
+			p->cursor = end - p->qlen;
+			if (p->cursor < -p->qlen) p->cursor = -p->qlen;
+			be_paletteRefilter();
+			return;
+		}
 
 		case CTRL_KEY('d'):
 			p->qlen = 0;
@@ -2177,8 +2526,11 @@ void processPaletteKeypress(int c) {
 	}
 
 	if (c >= 32 && c < 127 && p->qlen < MAX_INPUT_SIZE) {
-		p->query[p->qlen++] = (char)c;
-		p->query[p->qlen] = '\0';
+		int at = p->qlen + p->cursor;
+		if (at < 0) return;
+		memmove(&p->query[at+1], &p->query[at], -p->cursor);
+		p->query[at] = (char)c;
+		p->query[++p->qlen] = '\0';
 		p->sel = 0;
 		be_paletteRefilter();
 	}
@@ -2213,7 +2565,7 @@ void be_processKeypress() {
 
 			case CTRL_KEY('o'):
 				be_openDialog_open(&state.open_dialog);
-				return;
+				return;	
 		}
 		return;
 	}
@@ -2349,6 +2701,18 @@ void be_processKeypress() {
 
 		case CTRL_KEY('l'):
 		case '\x1b':
+			break;
+
+		case M_LEFT_CLICK:
+			be_handleMouseKeys(M_LEFT_CLICK);
+			break;
+
+		case M_OTHER_CLICK:
+			break;
+
+		case M_SCROLL_UP:
+		case M_SCROLL_DOWN:
+			be_handleMouseScroll(c);
 			break;
 
 		default:
@@ -2671,6 +3035,9 @@ void be_refreshScreen() {
 	StringBuilder sb;
 	sb_init(&sb);
 
+	/* Begin a synchronized screen update to remove any artifacting and tearing */
+	sb_append(&sb, "\x1b[?2026h");
+
 	// Clear Screen Calls :: Before drawing rows
 	sb_append(&sb, "\x1b[?25l");
 	sb_append(&sb, "\x1b[H");
@@ -2692,46 +3059,42 @@ void be_refreshScreen() {
 	}
 
     if (state.save_dialog.active) {
-        int dlg_x, dlg_y;
-        be_drawSaveDialog(&sb, &dlg_x, &dlg_y);
-
+        be_drawSaveDialog(&sb, &state.loc_x, &state.loc_y);
+		
 		if (state.save_dialog.focus == SD_FOCUS_INPUT) {
 			char buf[32];
-			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", dlg_y + 1, dlg_x + 1);
+			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.loc_x + 1, state.loc_y + 1);
 			sb_append(&sb, buf);
 			sb_append(&sb, "\x1b[?25h");
 		}
     }
 
 	if (state.open_dialog.active) {
-		int dlg_x, dlg_y;
-		be_drawOpenDialog(&sb, &dlg_x, &dlg_y);
+		be_drawOpenDialog(&sb, &state.loc_x, &state.loc_y);
 
 		if (state.open_dialog.focus == OD_FOCUS_INPUT) {
 			char buf[32];
-			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", dlg_y + 1, dlg_x + 1);
+			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.loc_y + 1, state.loc_x + 1);
 			sb_append(&sb, buf);
 			sb_append(&sb, "\x1b[?25h");
 		}
 	}
 
 	if (state.goto_dialog.active) {
-		int dlg_x, dlg_y;
-		be_drawGotoDialog(&sb, &dlg_x, &dlg_y);
+		be_drawGotoDialog(&sb, &state.loc_x, &state.loc_y);
 
 		if (state.goto_dialog.focus == GD_FOCUS_INPUT) {
 			char buf[32];
-			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", dlg_y + 1, dlg_x + 1);
+			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.loc_y + 1, state.loc_x + 1);
 			sb_append(&sb, buf);
 			sb_append(&sb, "\x1b[?25h");
 		}
 	}
 
 	if (state.find.active) {
-		int find_x, find_y;
-		be_drawFindBar(&sb, &find_x, &find_y);
+		be_drawFindBar(&sb, &state.loc_x, &state.loc_y);
 		char buf[32];
-		snprintf(buf, sizeof(buf), "\x1b[%d;%dH", find_y + 1, find_x + 1);
+		snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.loc_y + 1, state.loc_x + 1);
 		sb_append(&sb, buf);
 		sb_append(&sb, "\x1b[?25h");
 	}
@@ -2741,10 +3104,13 @@ void be_refreshScreen() {
         int cmd_x, cmd_y;
 		be_drawPalette(&sb, &cmd_x, &cmd_y);
 		char buf[32];
-		snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cmd_y + 1, cmd_x + 1);
+		snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cmd_y+1, cmd_x+1+state.pal.cursor);
 		sb_append(&sb, buf);
 		sb_append(&sb, "\x1b[?25h");
 	}
+
+	/* End synchronized update */
+	sb_append(&sb, "\x1b[?2026l");
 
 	size_t res = write(STDOUT_FILENO, sb.data, sb.len);
 	be_check_and_raise(res == sb.len, "Could not clear screen", BE_ERR_RENDER);
@@ -2773,6 +3139,8 @@ void be_initEditor(void) {
 	state.def_y = 0;
 	state.cur_x = 0;
 	state.cur_y = 0;
+	state.loc_x = 0;
+	state.loc_y = 0;
 	state.row_x = 0;
 
 	state.rowoff = 0;
@@ -2831,6 +3199,13 @@ int main(int argc, char **argv) {
     be_enableRawMode();
 	be_initEditor();
 
+	// Enable Mouse Support
+	if (ENABLE_MOUSE_SUPPORT) {
+		if (write(STDOUT_FILENO, "\x1b[?1000h\x1b[?1006h", 16) != 16) {
+			be_check_and_raise(1, "Could not enable mouse support", BE_ERR_TERM);
+		} 
+	}
+
 	// Open the file
 	if (argc >= 2) {
 		char *filepath = argv[1];
@@ -2850,6 +3225,11 @@ int main(int argc, char **argv) {
     while (1) {
 		be_refreshScreen();
 		be_processKeypress();
+
+		int pending = 0;
+		while (ioctl(STDIN_FILENO, FIONREAD, &pending) == 0 && pending > 0) {
+			be_processKeypress();
+		}
     }
     return 0;
 }

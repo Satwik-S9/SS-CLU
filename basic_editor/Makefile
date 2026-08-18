@@ -5,7 +5,7 @@ TARGET     := ${TARGET_DIR}/be
 
 all:
 	@mkdir -p ${TARGET_DIR}
-	gcc -o ${TARGET} main.c -O2 -Wall -Wextra
+	gcc -o ${TARGET} be.c -O2 -Wall -Wextra
 
 clean:
 	@rm -rf ${TARGET_DIR}

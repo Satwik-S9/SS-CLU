@@ -13,55 +13,36 @@
 - [x] Add Ctrl+A, Ctrl+E, Alt+A, Alt+E
 - [x] Ctrl+O Shows first few files/folders in directory under (Non Interactive)
 - [x] Enable find functionality for the editor
-- [ ] Unify some interfaces
-- [ ] Port all configuration to config.h file
-- [ ] Add mouse capability to the editor -- Only Scrolling (main editor) and Click moves the cursor and presses buttons
+- [x] Enable line editing and navigation on the dialog boxes too
+- [ ] Unify some interfaces and colorschemes
+- [x] Port all configuration to config.h file (Suckless Style !!)
+- [x] Add mouse capability to the editor -- Only Scrolling (main editor) and Click moves the cursor and presses buttons
 
 
 # Planned Features
+- ~A full text editor which can load and edit files without having much learning curve.~
+- ~Simple mouse mode which can be used for navigation (on by default).~
+- ~Low on disc space and memory (~70kb Executable, takes about 2M memory for opening a file of 2500+ lines).~
+	- vi mem usage: 14M
+	- nvim mem usage:
 - `+<ROW>:<COL>` flag to have editor open a specific row, column of the provided text file.
+- A basic cli interface which has `--help` and `--version` flag along with the `+` flags
 - Syntax Highlighting using predefined keyword matching by baking the keywords file at compile time into the program (Or it can also have the file load at file opening time).
-- Command bar using CTRL+P
-- A very basic configuration file containing (config.h)
-  - How many spaces should each tab use (DEFAULT: 4)
-  - Colorschemes to use: Default Terminal Colors
-- DEL, BACKSPACE, CTRL+DEL, CTRL+BACKSPACE and CTRL+ARROW keys should be handled (Readline like functionality)
-- Simple and Minimal dialog boxes for handling basic operations
-- A basic find feature
+- ~Command Palette using CTRL+P~
+- A basic suckless style configuration file (config.h) for configuring various settings for the editor
+- ~DEL, BACKSPACE, CTRL+DEL, CTRL+BACKSPACE and CTRL+ARROW keys should be handled (Readline like functionality)~
+- ~Simple and Minimal dialog boxes for handling basic operations~
+- ~A basic find feature~
 - A find and replace feature
-- Enable line and word selection features
+- ~Enable line and word selection features~
 - Keymaps for CTRL+C, CTRL+V (Clipboard), CTRL+X
-- Syntax Highlighting
+- Automatic pairing for brackets and quotes
+- A very basic file explorer like interface embedded in the open dialog
+- ?? Enable clean patching using `patch.h` and `patch.c` files ??
 
-## Keymaps
-1. `CTRL + SHIFT + E`: Goto the end of the file
-2. `CTRL + SHIFT + T`: Goto the top of the file
-3. `CTRL + T`: Goto the top of of the line
-4. `CTRL + E`: Goto the end of the line
-5. `CTRL+C, CTRL+V, CTRL+X, CTRL+K`: Copy, Paste, Cut, Select-Line
-6. `CTRL + HOME | END`: Goto the top/end of of the line 
-
-
-# Resources 
-## LOGO
-▄▄▄ ▄ ▄ ▄   ▄
-
-## Homepage
-▄▄▄ ▄ ▄ ▄   ▄
-
-be — a basic editor   v0.1
-quick edits, no hassle.
-
-─── functions & keymaps ───
-Ctrl+S          save file
-Ctrl+Q          quit — asks before losing changes
-Ctrl+P          command palette · every function below
-Ctrl+F          find in file
-Ctrl+G          go to line
-Ctrl+O          open a file · one buffer, one file
-Ctrl+K          select line
-Ctrl+T/E        goto the top or end of the line
-Ctrl+Home/End   goto the top or end of the file
-Ctrl+Shift+T/E  goto the top or end of the file
-↑↓←→     move · Home / End · PgUp / PgDn
-press Enter to open an empty buffer — or Ctrl+P for commands
+# Stats on Memory usage (Ram)
+> **File:** main.c (BE V1.0 source code -- ~3300 loc)
+1. BE   : ~2M
+2. vi   : ~14M
+3. nvim : ~15M
+4. nano : ~6.3M
