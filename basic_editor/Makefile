@@ -1,11 +1,27 @@
+# Compiler
+CC := cc
+
+# Compiler and Linker Flags
+CFLAGS := -Wall -Wextra -O2
+LDFLAGS := 
+
+# Source and Targets
 TARGET_DIR := ./build
 TARGET     := ${TARGET_DIR}/be
+SOURCE 	   := be.c
+PREFIX     ?= $(HOME)/.local/bin
 
-.PHONY: all, clean, run
+.PHONY: all, install, clean, run
 
-all:
+all: ${TARGET}
+
+${TARGET}: ${SOURCE}
 	@mkdir -p ${TARGET_DIR}
-	gcc -o ${TARGET} be.c -O2 -Wall -Wextra
+	gcc -o $@ $< ${CFLAGS}
+
+install: ${TARGET}
+	@mkdir -p $(PREFIX)
+	install -m 755 ${TARGET} $(PREFIX)/be
 
 clean:
 	@rm -rf ${TARGET_DIR}

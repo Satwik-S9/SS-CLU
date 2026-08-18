@@ -32,7 +32,7 @@
 #endif
 
 #define CTRL_KEY(k) ((k) & 0x1f)
-#define BASIC_EDITOR_VERSION "1.0.0"
+#define BASIC_EDITOR_VERSION "1.0.1"
 
 #define B_H   "─"   /* horizontal              */
 #define B_V   "│"   /* vertical                */
@@ -177,7 +177,7 @@ static const BE_HomepageLine homepage[] = {
 	{ {{S_KEY,"↑↓←→    "},{S_TEXT,"move · Home / End · PgUp / PgDn\r\n"}},   2, AL_BLOCK  },
 	{ {{NULL, "\r\n"}},                                                     1, AL_CENTER },
 	{ {{S_DIM,"press "},{S_KEY,"Enter"},
-	   {S_DIM," to open a file — or "},{S_KEY,"Ctrl+P"},
+	   {S_DIM," to open a blank file — or "},{S_KEY,"Ctrl+P"},
 	   {S_DIM," for commands"}},                                        5, AL_CENTER },
 };
 
@@ -3194,6 +3194,30 @@ void be_quitEditor(void) {
 	be_quitNow(NULL);
 }
 
+void be_processFileArg(const char *filepath) {
+	if (!validFilename(filepath)) {
+		be_setStatusMsg("{X} Invalid filename provided");
+		return;
+	}
+	int is_dir_res = isDir(filepath);
+	if (is_dir_res == -1) {
+		be_setStatusMsg("{X} Invalid filename provided");
+	}
+	else if (is_dir_res == -2) {
+		be_setStatusMsg("{X} Error occured while opening");
+	}
+	else if (is_dir_res == 1) {
+		be_setStatusMsg("{X} Provided path is a directory");
+	}
+	else {
+		if (checkFileExists(filepath)) be_openFile(filepath);
+		else {
+			be_openBlankFile();
+			state.filename = strdup(filepath);
+		}
+	}
+}
+
 /* Main Loop */
 int main(int argc, char **argv) {
     be_enableRawMode();
@@ -3208,17 +3232,28 @@ int main(int argc, char **argv) {
 
 	// Open the file
 	if (argc >= 2) {
-		char *filepath = argv[1];
-		if (!validFilename(filepath)) be_setStatusMsg("{X} Invalid filename provided");
-		int is_dir_res = isDir(filepath);
-		if (is_dir_res == -1) be_setStatusMsg("{X} Invalid filename provided");
-		else if (is_dir_res == -2) be_setStatusMsg("{X} Error occured while opening");
-		else if (is_dir_res == 1) be_setStatusMsg("{X} Provided path is a directory");
+		if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
+			be_disableRawMode();
+			printf("Basic Editor (be) -- Version: %s\n", BASIC_EDITOR_VERSION);
+			return 0;
+		} else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+			be_disableRawMode();
+			printf("Basic Editor (be).\nUsage:\n  - be <filename>: to open a file\n");
+			printf("  - be <filename> +row: to open a file at a specific row\n");
+			printf("  - be <filename> +row:col: to open a file at a specific row & col\n");
+			printf("  - be -v|--version: Show version\n");
+			printf("  - be -h|--help: Show help\n");
+			return 0;	
+		}
 		else {
-			if (checkFileExists(filepath)) be_openFile(argv[1]);
-			else {
-				be_openBlankFile();
-				state.filename = strdup(filepath);
+			be_processFileArg(argv[1]);
+			if (argc == 3 && argv[2][0] == '+') {
+				char *rowi = strchr(argv[2], '+');
+				char *coli = strchr(argv[2], ':');
+				if (rowi != NULL) state.cur_y = atoi(rowi+1)-1;
+				if (coli != NULL) state.cur_x = atoi(coli+1)-1;
+			} else if (argc >= 3) {
+				be_setStatusMsg("{X} Invalid args provided ... Ignoring !!");
 			}
 		}
 	}

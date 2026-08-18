@@ -1,7 +1,7 @@
 // TODO: Convert all colors to hexcodes and add a colorscheme struct to be.h so that we can build colorscheme on launch of editor
 /* Theme Settings */
-#define LIGHT_THEME_MODE  /* Enable Light Mode */
-// #define DARK_THEME_MODE   /* Enable Dark Mode */
+// #define LIGHT_THEME_MODE  /* Enable Light Mode */
+#define DARK_THEME_MODE   /* Enable Dark Mode */
 
 /* Status Bar Colors for dark theme mode */
 #ifdef DARK_THEME_MODE

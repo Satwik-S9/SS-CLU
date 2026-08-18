@@ -14,19 +14,18 @@
 - [x] Ctrl+O Shows first few files/folders in directory under (Non Interactive)
 - [x] Enable find functionality for the editor
 - [x] Enable line editing and navigation on the dialog boxes too
-- [ ] Unify some interfaces and colorschemes
 - [x] Port all configuration to config.h file (Suckless Style !!)
 - [x] Add mouse capability to the editor -- Only Scrolling (main editor) and Click moves the cursor and presses buttons
+- [ ] Unify some interfaces and colorschemes: the `Colorscheme` struct and build colorscheme function which takes hexcodes to build unified colorscheme
+- [x] Add README.md file
 
 
 # Planned Features
 - ~A full text editor which can load and edit files without having much learning curve.~
 - ~Simple mouse mode which can be used for navigation (on by default).~
-- ~Low on disc space and memory (~70kb Executable, takes about 2M memory for opening a file of 2500+ lines).~
-	- vi mem usage: 14M
-	- nvim mem usage:
-- `+<ROW>:<COL>` flag to have editor open a specific row, column of the provided text file.
-- A basic cli interface which has `--help` and `--version` flag along with the `+` flags
+- ~Low on disc space and memory (about 70kb Executable, takes about 2M memory for opening a file of 2500+ lines).~
+- ~`+<ROW>:<COL>` flag to have editor open a specific row, column of the provided text file.~
+- ~A basic cli interface which has `--help` and `--version` flag along with the `+` flags~
 - Syntax Highlighting using predefined keyword matching by baking the keywords file at compile time into the program (Or it can also have the file load at file opening time).
 - ~Command Palette using CTRL+P~
 - A basic suckless style configuration file (config.h) for configuring various settings for the editor
@@ -38,7 +37,11 @@
 - Keymaps for CTRL+C, CTRL+V (Clipboard), CTRL+X
 - Automatic pairing for brackets and quotes
 - A very basic file explorer like interface embedded in the open dialog
+- Mouse Drag support for selection.
+- Move line up and down
 - ?? Enable clean patching using `patch.h` and `patch.c` files ??
+    - Mark support
+    - Next paragraph navigation support 
 
 # Stats on Memory usage (Ram)
 > **File:** main.c (BE V1.0 source code -- ~3300 loc)
