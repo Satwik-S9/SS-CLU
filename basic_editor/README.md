@@ -23,14 +23,14 @@ A small, dependency-free terminal text editor written in C. Quick edits, no hass
 
 ### What this isn't and will never be
 1. A Vim/Emacs replacement — there are no modes, no keybinding remaps, no plugin system.
-2. Syntax-highlighting aware (yet — see [Planned](#planned)).
-3. A full featured ide or tui-ide which has modern features multi-threaded multi-cursor support or any other fancy features.
+2. A full featured ide or tui-ide which has modern features multi-threaded multi-cursor support or any other fancy features.
+
+> Some features are still in planning state. See [planned](#planned) to see them
 
 ## Showcase
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/dark-be.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/light-be.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/combined-be.png">
   <img alt="be splash screen, light and dark themes side by side" src="assets/combined-be.png">
 </picture>
 
