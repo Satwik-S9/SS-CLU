@@ -9,7 +9,7 @@
 A small, dependency-free terminal text editor written in C. Quick edits, no hassle.
 
 > **Author:** Satwik Srivastava<br/>
-> **Version:** 1.0.1<br/>
+> **Version:** 1.0.2<br/>
 > **License:** MIT<br/>
 
 ---
@@ -49,7 +49,7 @@ A small, dependency-free terminal text editor written in C. Quick edits, no hass
 - Mouse support: click to move the cursor, scroll to navigate (toggle in `config.h`)
 - `+ROW` / `+ROW:COL` CLI flags to open a file at a specific position
 - Light and dark themes, fully defined in `config.h`
-- Tiny footprint: ~2MB resident for a 3200+ line file (`vi` ~14MB, `nvim` ~15MB, `nano` ~6.3MB on the same file)
+- Tiny footprint: \~2MB resident for a 3200+ line file (`vi` \~14MB, `nvim` \~15MB, `nano` \~6.3MB on the same file)
 - Single C file, no external dependencies beyond the C standard library and POSIX termios
 
 ## Keybindings

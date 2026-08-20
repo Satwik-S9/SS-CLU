@@ -1,4 +1,5 @@
 /* Includes */
+/** GLIBC (POSIX) **/
 #include <limits.h>
 #include <ctype.h>
 #include <stddef.h>
@@ -16,10 +17,11 @@
 #include <fcntl.h>
 #include <dirent.h>
 
+/** Personal Headers **/
 #include "be.h"
 #include "config.h"
 
-/* Defines */
+/* Macro Definitions */
 #define _BSD_SOURCE
 #define _GNU_SOURCE
 
@@ -31,336 +33,48 @@
 	#define PATH_MAX 4096
 #endif
 
-#define CTRL_KEY(k) ((k) & 0x1f)
-#define BASIC_EDITOR_VERSION "1.0.1"
-
-#define B_H   "─"   /* horizontal              */
-#define B_V   "│"   /* vertical                */
-#define B_TL  "╭"   /* top-left  (rounded)     */
-#define B_TR  "╮"   /* top-right (rounded)     */
-#define B_BL  "╰"   /* bot-left  (rounded)     */
-#define B_BR  "╯"   /* bot-right (rounded)     */
-#define B_LT "├"
-#define B_RT "┤"
-
-#define MAX_SPANS 6
-
-/** Palette Highlights **/
-#ifdef LIGHT_THEME_MODE
-	#define PAL_DIM    "\x1b[38;2;190;190;190m" /* faint border/hint grey, barely off-white     */
-	#define PAL_TEXT   "\x1b[38;2;110;110;110m" /* regular command-name grey, readable on white */
-	#define PAL_BOLD   "\x1b[1;38;2;20;20;20m"  /* near-black bold, for what you've typed       */
-	#define PAL_SEL    "\x1b[48;2;225;225;225m" /* soft grey row highlight (matches STATUS_BAR_BACKGROUND) */
-#endif
-
-#ifdef DARK_THEME_MODE
-	#define PAL_DIM    "\x1b[38;5;240m"
-	#define PAL_TEXT   "\x1b[38;5;250m"
-	#define PAL_BOLD   "\x1b[1;38;5;253m"
-	#define PAL_SEL    "\x1b[48;5;236m"
-#endif
-
-#define PAL_RESET  "\x1b[0m"
-#define PAL_ACCENT "\x1b[38;2;133;153;0m"
-#define PAL_ERROR  "\x1b[38;2;220;50;47m"
-
-// Mod Keys !!
+// Mod Keys
 #define MOD_SHIFT 0x01
 #define MOD_ALT   0x02
 #define MOD_CTRL  0x04
 
-// Default Tab Size
-#define MAX_INPUT_SIZE 	  256
-#define DEFAULT_TAB_SIZE  4
+#define FMT_RESET  "\x1b[0m"
+#define FMT_BOLD 	"\x1b[1m"
 
-// Gutter: "%5d" + "\u2502" + " " == 7 cells
-#define GUTTER_WIDTH 7
+// Define macro to detect Ctrl Keypress
+#define CTRL_KEY(k) ((k) & 0x1f)
 
-// Load Statusbar theme
-static struct StatusBar_Theme sb_theme = { STATUS_BAR_BACKGROUND, STATUS_BAR_FOREGROUND};
-/* Data Models */
-
-/** Generic Data Models **/
-/* String Builder */
-typedef struct {
-	char *data;
-	size_t len;
-	size_t cap;
-} StringBuilder;
-
-
-/** BE Specific Data Models **/
-typedef enum {
-	BE_ERR_ASSERT,
-	BE_ERR_RENDER,
-	BE_ERR_TERM,
-	BE_ERR_OP
-} BE_ErrorKind;
-
-
-typedef enum {
-	// Keys present in ASCII
-	BACKSPACE = 0x7f,
-
-    // Nav Keys
-    ARROW_LEFT  = 1000,
-	ARROW_RIGHT,
-	ARROW_DOWN,
-	ARROW_UP,
-	PAGE_UP,
-	PAGE_DOWN,
-	HOME,
-	END,
-	CTRL_HOME,
-	CTRL_END,
-	DELETE,
-	WORD_DELETE,
-	WORD_RIGHT,
-	WORD_LEFT,
-	// NOTE: CTRL_BACKSPACE must NOT be 0x08 -- that's the literal ASCII
-	// byte for Ctrl+H, which collides with CTRL_KEY('h') and makes
-	// CTRL_BACKSPACE unusable as its own switch case anywhere both are
-	// handled (e.g. alongside a dialog's plain-Backspace case).
-	CTRL_BACKSPACE,
-
-	// Special Mod Keys
-	CTRL_SHIFT_S,
-    ALT_A,
-    ALT_E,
-
-	// Mouse Clicks
-	M_LEFT_CLICK,
-	M_OTHER_CLICK,
-	M_SCROLL_UP,
-	M_SCROLL_DOWN
-} BE_Key;
-
-typedef enum {
-	AL_CENTER,
-	AL_BLOCK
-} BE_Align;
-
-typedef enum {
-	SPLASH,
-	EDIT
-} BE_Mode;
-
-typedef struct {
-	const char *style;
-	const char *text;
-} BE_Span;
-
-
-typedef struct {
-	BE_Span  spans[MAX_SPANS];
-	int 	 nspans;
-	BE_Align align;
-} BE_HomepageLine;
-
-
+/* Global Level Constants : Since this is a simple single threaded app I will use them to keep things easy */
 /* Homepage Lines */
 static const BE_HomepageLine homepage[] = {
-	{ {{S_DIM, "▄▄▄  ▄  ▄  ▄   ▄"}},                                    1, AL_CENTER },
-	{ {{NULL, "\r\n"}},                                                     1, AL_CENTER },
+	{ {{S_DIM, "▄▄▄  ▄  ▄  ▄   ▄"}},                                    	  1, AL_CENTER },
+	{ {{NULL, "\r\n"}},                                                 	  1, AL_CENTER },
     { {{S_KEY,"be"},{S_TEXT," — a basic editor   "},
-	   {S_DIM,"v" BASIC_EDITOR_VERSION}},                               3, AL_CENTER },
-	{ {{S_DIM, "quick edits, no hassle."}},                             1, AL_CENTER },
-	{ {{NULL, "\r\n"}},                                                     1, AL_CENTER },
-	{ {{S_DIM, "── functions & keymaps ──"}},                           1, AL_CENTER },
-	{ {{NULL, ""}},                                                     1, AL_CENTER },
-	{ {{S_KEY,"Ctrl+S  "},{S_TEXT,"save file\r\n"}},                        2, AL_BLOCK  },
-	{ {{S_KEY,"Ctrl+Q  "},{S_TEXT,"quit — asks before losing changes\r\n"}},2, AL_BLOCK  },
-	{ {{S_KEY,"Ctrl+P  "},{S_TEXT,"command palette · every function\r\n"}},  2, AL_BLOCK  },
-	{ {{S_KEY,"Ctrl+F  "},{S_TEXT,"find in file\r\n"}},                     2, AL_BLOCK  },
-	{ {{S_KEY,"Ctrl+G  "},{S_TEXT,"go to line\r\n"}},                       2, AL_BLOCK  },
-	{ {{S_KEY,"Ctrl+O  "},{S_TEXT,"open a file · one buffer, one file\r\n"}},2, AL_BLOCK },
-	{ {{S_KEY,"↑↓←→    "},{S_TEXT,"move · Home / End · PgUp / PgDn\r\n"}},   2, AL_BLOCK  },
-	{ {{NULL, "\r\n"}},                                                     1, AL_CENTER },
+	   {S_DIM,"v" BASIC_EDITOR_VERSION}},                               	  3, AL_CENTER },
+	{ {{S_DIM, "quick edits, no hassle."}},                             	  1, AL_CENTER },
+	{ {{NULL, "\r\n"}},                                                 	  1, AL_CENTER },
+	{ {{S_DIM, "── functions & keymaps ──"}},                           	  1, AL_CENTER },
+	{ {{NULL, ""}},                                                     	  1, AL_CENTER },
+	{ {{S_KEY,"Ctrl+S  "},{S_TEXT,"save file\r\n"}},                          2, AL_BLOCK  },
+	{ {{S_KEY,"Ctrl+Q  "},{S_TEXT,"quit — asks before losing changes\r\n"}},  2, AL_BLOCK  },
+	{ {{S_KEY,"Ctrl+P  "},{S_TEXT,"command palette · every function\r\n"}},   2, AL_BLOCK  },
+	{ {{S_KEY,"Ctrl+F  "},{S_TEXT,"find in file\r\n"}},                       2, AL_BLOCK  },
+	{ {{S_KEY,"Ctrl+G  "},{S_TEXT,"go to line\r\n"}},                         2, AL_BLOCK  },
+	{ {{S_KEY,"Ctrl+O  "},{S_TEXT,"open a file · one buffer, one file\r\n"}}, 2, AL_BLOCK },
+	{ {{S_KEY,"↑↓←→    "},{S_TEXT,"move · Home / End · PgUp / PgDn\r\n"}},    2, AL_BLOCK  },
+	{ {{NULL, "\r\n"}},                                                       1, AL_CENTER },
 	{ {{S_DIM,"press "},{S_KEY,"Enter"},
 	   {S_DIM," to open a blank file — or "},{S_KEY,"Ctrl+P"},
-	   {S_DIM," for commands"}},                                        5, AL_CENTER },
+	   {S_DIM," for commands"}},                                        	  5, AL_CENTER },
 };
 
-/* Save Dialog Structures */
-typedef enum {
-	SD_FOCUS_INPUT,
-	SD_FOCUS_SAVE,
-	SD_FOCUS_QUIT,
-	SD_FOCUS_CANCEL,
-	SD_FOCUS_COUNT
-} BE_SaveDialogFocus;
+/* Initialize the editor theme */
+static Colorscheme colorscheme;
 
-typedef struct {
-	int					cursor; // Basically Stores the x offset
-    bool   				active;
-	bool   				quit_on_save;
-	BE_SaveDialogFocus 	focus;
-    char   				input_path[MAX_INPUT_SIZE + 1];
-	// int, not size_t: cursor arithmetic below (inputlen + cursor, where
-	// cursor can be negative) needs signed math -- mixing size_t with a
-	// negative int silently promotes to a huge unsigned value instead.
-	int 				inputlen;
-} BE_SaveDialog;
-
-/* Open Dialog Box Structures */
-typedef enum {
-	OD_FOCUS_INPUT,
-	OD_FOCUS_OPEN,
-	OD_FOCUS_CANCEL,
-	OD_FOCUS_COUNT,
-} BE_OpenDialogFocus;
-
-typedef struct {
-	int 				cursor;
-	bool 				active;
-	bool 				create_file;
-	BE_OpenDialogFocus 	focus;
-	char 				input_path[MAX_INPUT_SIZE + 1];
-	// int, not size_t -- see BE_SaveDialog.inputlen for why.
-	int					inputlen;
-} BE_OpenDialog;
-
-typedef enum {
-	GD_FOCUS_INPUT,
-	GD_FOCUS_GOTO,
-	GD_FOCUS_CANCEL,
-	GD_FOCUS_COUNT,
-} BE_GotoDialogFocus;
-
-typedef struct {
-	BE_GotoDialogFocus focus;
-	int  cursor;
-	bool active;
-	int  inputlen;
-	char input[32];
-} BE_GotoDialog;
-
-typedef struct {
-	// int cx, cy;
-	int size;
-	int rsize;
-	char *data;
-	char *render;
-} BE_Row;
-
-
-/* Find: incremental search over the current buffer. */
-typedef struct { int row, col; } BE_Match;   /* col = byte index into row->data */
-
-typedef struct {
-	bool 		active;
-	int			cursor;
-	int  		inputlen;
-	int 		nmatches;
-	int			cur;
-	int 		saved_cur_x, saved_cur_y, saved_rowoff, saved_coloff;
-	BE_Match 	*matches;
-	char 		input[MAX_INPUT_SIZE + 1];
-} BE_Find;
-
-typedef enum {
-	CMD_SAVE = 0,
-	CMD_SAVEAS,
-	CMD_OPEN,
-	CMD_QUIT,
-	CMD_GOTO,
-	CMD_GTST,
-	CMD_GTEN,
-	CMD_FIND,
-} PaletteCmdType;
-
-typedef struct {
-	PaletteCmdType	cmd_type; 
-	const char 		*name;
-	const char 		*hint;
-} BE_Command;
-
-static const BE_Command commands[] = {
-	{ CMD_SAVE, 	"save file",			"^S" },
-	{ CMD_SAVEAS, 	"save file as",		"^⇧ S" },
-	{ CMD_OPEN, 	"open file",			"^O" },
-	{ CMD_QUIT, 	"quit", 				"^Q" },
-	{ CMD_GOTO, 	"go to line", 			"^G" },
-	{ CMD_GTST, 	"go to start of file",	"^Home" },
-	{ CMD_GTEN, 	"go to end of file",    "^End" },
-	{ CMD_FIND, 	"find in file", 		"^F" },
-};
-
-#define NCOMMANDS ((int)(sizeof(commands) / sizeof(commands[0])))
-
-typedef struct {
-	bool open;
-	char query[MAX_INPUT_SIZE + 1];
-	int  cursor;
-	int  qlen;
-	int  max_rows;
-	int  sel;
-	int  nfiltered;
-	int  filtered[NCOMMANDS];
-} BE_CmdPalette;
-
-/* Modes:
-* 0: Left Click,
-* 2: Right Click, 
-* 64: Scroll Up, 
-* 65: Scroll Dowm 
-* */
-typedef struct { 
-	int 	sx, sy;
-	int 	ex, ey;
-	int 	mode;
-} BE_MouseEvent;
-
-typedef struct {
-	int    			def_x, def_y;
-	int    			cur_x, cur_y;
-	int				loc_x, loc_y;
-	int     		row_x;
-	int    			rowoff;
-	int 			coloff;
-	int    			screenrows;
-	int    			screencols;
-	int    			numrows;
-	int	    		dirty;
-	BE_Mode			mode;
-	BE_MouseEvent	mouse;
-	BE_GotoDialog   goto_dialog;
-	BE_OpenDialog	open_dialog;
-    BE_SaveDialog 	save_dialog;
-	BE_Find 		find;	
-	BE_CmdPalette   pal;
-	BE_Row 			*row;
-	char			*filename;
-	char			statusmsg[80];
-	time_t			statusmsg_time;
-	struct termios 	orig_termios;
-} BE_State;
-
-
+/* Initialize the Editor State */
 static BE_State state;
 
-// Forward Declarations for some functions: TODO: Move this to be.h
-void be_quitEditor(void);
-void be_quitNow(const char *message);
-void be_die(const char *s);
-void be_openBlankFile();
-void be_editorInsertChar(int c);
-bool be_saveFile(size_t *out_len);
-void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y);
-void be_drawRowWithMatches(StringBuilder *sb, int filerow, int coloff, int len);
-void be_deleteChar();
-void be_insertNewLine();
-bool validFilename(const char *filename);
-bool checkFileExists(const char *filepath);
-int isDir(const char *filename);
-void be_setStatusMsg(const char *msg);
-void be_openBlankFile();
-void be_openFile(const char *filename);
-void be_clearRows(void);
-void be_updateRow(BE_Row *row);
-int be_calculateRx(BE_Row *row, int cx);
-
-/** String Builder Methods **/
+/* String Builder Methods */
 void sb_init(StringBuilder *sb) {
         sb->cap = 16;
         sb->len = 0;
@@ -416,6 +130,69 @@ void sb_repeat(StringBuilder *sb, const char *s, int n) {
 	for (int i=0; i<n; i++) sb_append(sb, s);
 }
 
+/* Colorsheme Related Methods */
+int hex2int(char hex) {
+	if (hex >= '0' && hex <= '9') return hex - '0';
+	switch (hex) {
+		case 'a': case 'A': return 10;
+		case 'b': case 'B': return 11;
+		case 'c': case 'C': return 12;
+		case 'd': case 'D': return 13;
+		case 'e': case 'E': return 14;
+		case 'f': case 'F': return 15;
+	}
+	return 0;
+}
+
+void hex2rgb(int *r, int *g, int *b, char *hexcode) {
+	if (strlen(hexcode) != 7 || hexcode[0] != '#') {
+		*r = -1; *g = -1; *b = -1;
+		return;
+	}
+
+	char *res = hexcode + 1;
+	*r = (hex2int(res[0]) * 16) + hex2int(res[1]);
+	*g = (hex2int(res[2]) * 16) + hex2int(res[3]);
+	*b = (hex2int(res[4]) * 16) + hex2int(res[5]);
+}
+
+void hex2color(Color *c, char *hexcode) {
+	hex2rgb(&c->r, &c->g, &c->b, hexcode);
+}
+
+void be_initColorscheme() {
+	// Init status bar colors
+	hex2color(&colorscheme.status.bg, STATUS_BAR_BACKGROUND);
+	hex2color(&colorscheme.status.fg, STATUS_BAR_FOREGROUND);
+
+	// Init Dialog Box Colors
+	hex2color(&colorscheme.dialog.ok, DIALOG_BOX_OK);
+	hex2color(&colorscheme.dialog.err, DIALOG_BOX_ERR);
+	hex2color(&colorscheme.dialog.dim, DIALOG_BOX_DIM);;
+	hex2color(&colorscheme.dialog.sel, DIALOG_BOX_SEL);;
+	hex2color(&colorscheme.dialog.text, DIALOG_BOX_TEXT);
+	hex2color(&colorscheme.dialog.file, DIALOG_BOX_FILE);
+	hex2color(&colorscheme.dialog.accent, DIALOG_BOX_ACCENT);
+
+	// Init Homescreen Colors
+	hex2color(&colorscheme.homepage.dim, HOMESCREEN_DIM);
+	hex2color(&colorscheme.homepage.key, HOMESCREEN_KEY);
+	hex2color(&colorscheme.homepage.text, HOMESCREEN_TEXT);
+}
+
+void be_bgOn(StringBuilder *sb, Color c) {
+	char c_esc_seq[64];
+	snprintf(c_esc_seq, sizeof(c_esc_seq), "\x1b[48;2;%d;%d;%dm", c.r, c.g, c.b);
+	sb_append(sb, c_esc_seq);
+}
+
+void be_fgOn(StringBuilder *sb, Color c) {
+	char c_esc_seq[64];
+	snprintf(c_esc_seq, sizeof(c_esc_seq), "\x1b[38;2;%d;%d;%dm", c.r, c.g, c.b);
+	sb_append(sb, c_esc_seq);
+}
+
+
 /** Save Dialog Methods **/
 void be_saveDialog_open(BE_SaveDialog *sd) {
 	if (state.mode == SPLASH) {
@@ -439,7 +216,6 @@ void be_saveDialog_open(BE_SaveDialog *sd) {
 		sd->inputlen = 0;
 	}
 }
-
 
 void be_saveDialog_close(BE_SaveDialog *sd) {
     sd->active = false;
@@ -790,32 +566,11 @@ static void be_paletteExecuteCmd(void) {
 }
 
 /* Helper funcitons */
-int hex2int(char hex) {
-	if (hex >= '0' && hex <= '9') return hex - '0';
-	switch (hex) {
-		case 'a': case 'A': return 10;
-		case 'b': case 'B': return 11;
-		case 'c': case 'C': return 12;
-		case 'd': case 'D': return 13;
-		case 'e': case 'E': return 14;
-		case 'f': case 'F': return 15;
-	}
-	return 0;
+void be_die(const char *s) {
+    perror(s);
+    exit(1);
 }
 
-void hex2rgb(int *r, int *g, int *b, char *hexcode) {
-	if (strlen(hexcode) != 7 || hexcode[0] != '#') {
-		*r = -1; *g = -1; *b = -1;
-		return;
-	}
-
-	char *res = hexcode + 1;
-	*r = (hex2int(res[0]) * 16) + hex2int(res[1]);
-	*g = (hex2int(res[2]) * 16) + hex2int(res[3]);
-	*b = (hex2int(res[4]) * 16) + hex2int(res[5]);
-}
-
-/* Terminal */
 void be_check_and_raise(bool expr, const char *err_msg, BE_ErrorKind err_kind) {
 	char *err_head;
 	switch (err_kind) {
@@ -828,7 +583,10 @@ void be_check_and_raise(bool expr, const char *err_msg, BE_ErrorKind err_kind) {
 		case BE_ERR_TERM:
 			err_head = "TerminalOp Error";
 			break;
-		case BE_ERR_OP:
+		case BE_ERR_FILE_OP:
+			err_head = "File Operation Error";
+			break;
+		case BE_ERR_GENERIC_OP:
 			err_head = "Operational Error";
 			break;
 		default:
@@ -841,15 +599,8 @@ void be_check_and_raise(bool expr, const char *err_msg, BE_ErrorKind err_kind) {
 	}
 }
 
-void be_die(const char *s) {
-	// int res = write(STDOUT_FILENO, "\x1b[2J", 4);
-	// res += write(STDOUT_FILENO, "\x1b[H", 3);
-	// be_check_and_raise(res != 7, "Could not clear screen for be_die function", BE_ERR_OP);
 
-    perror(s);
-    exit(1);
-}
-
+/* Terminal */
 /* NOTE this still is not working perfectly. This needs to be checked and fixed for tmux */
 static void be_writeTermSeq(const char *seq, size_t len) {
     if (getenv("TMUX") == NULL) {
@@ -872,13 +623,7 @@ static void be_writeTermSeq(const char *seq, size_t len) {
 }
 
 void be_disableRawMode(void) {
-    /* Pop the keyboard protocol enhancement pushed in be_enableRawMode():
-     * leaving it on would change how keys are reported for whatever the
-     * user's shell runs next. Terminals that never understood the push
-     * ignore the pop the same harmless way. */
     be_writeTermSeq("\x1b[<u", 4);
-    /* Cursor visibility is terminal-global and outlives the process: if we
-     * exit while hidden, the user's shell inherits an invisible cursor. */
     if (write(STDOUT_FILENO, "\x1b[?25h", 6) != 6) { /* best effort */ }
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &state.orig_termios) == -1)
         be_die("tcsetattr");
@@ -890,8 +635,7 @@ void be_enableRawMode(void) {
     atexit(be_disableRawMode);
 
     struct termios raw = state.orig_termios;
-    // Set raw mode by disabling echo and canonical mode
-    // raw.c_iflag = ~(IXON | ICRNL);
+
     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
     raw.c_oflag &= ~(OPOST);
     raw.c_cflag |= (CS8);
@@ -902,172 +646,7 @@ void be_enableRawMode(void) {
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) be_die("tcsetattr");
 
-    /* Push the Kitty keyboard protocol's "disambiguate escape codes" flag
-     * (bit 1). Without it, Ctrl+Shift+S is the exact same byte as Ctrl+S on
-     * the wire — there's no way to tell them apart. Terminals that support
-     * the protocol start reporting Ctrl+Shift+<letter> (and a few other
-     * otherwise-ambiguous keys) as distinct CSI sequences; terminals that
-     * don't recognize this escape simply ignore it and nothing changes. */
     be_writeTermSeq("\x1b[>1u", 5);
-}
-
-int be_readKey() {
-	int nread;
-	char c;
-	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
-		if (nread == -1 && errno != EAGAIN) be_die("read");
-	}
-
-	if (c != '\x1b') {
-	    return (unsigned char)c;
-	}
-
-	char ch;
-	if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
-
-	/* SS3 form: ESC O <final>. Never carries modifiers. */
-    if (ch == 'O') {
-            if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
-            switch (ch) {
-				case 'H': return HOME;
-				case 'F': return END;
-				case 'A': return ARROW_UP;
-				case 'B': return ARROW_DOWN;
-				case 'C': return ARROW_RIGHT;
-				case 'D': return ARROW_LEFT;
-            }
-            return '\x1b';
-    }
-
-    /* Bare "ESC <byte>" form: Meta/Alt-modified keys. Terminals encode
-     * Alt+<key> this way by default (no CSI wrapper) rather than as a
-     * modifier bit inside a CSI sequence — that's why Alt+b / Alt+f never
-     * matched anything below. Ctrl+Backspace is indistinguishable from
-     * Alt+Backspace at the protocol level too: both arrive as ESC
-     * followed by DEL (0x7f), so both are handled here. */
-    if (ch != '[') {
-        switch (ch) {
-            case 'b': return WORD_LEFT;
-            case 'f': return WORD_RIGHT;
-            case 0x7f:
-            case 0x08: return CTRL_BACKSPACE;
-            case 'a':  return ALT_A;
-            case 'e':  return ALT_E;
-        }
-        return '\x1b';
-    }
-
-    /* CSI form: collect params until a final byte (0x40-0x7E). */
-    char seq[24];
-    size_t n = 0;
-    char final = 0;
-
-    while (n < sizeof(seq) - 1) {
-        if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
-        if (ch >= 0x40 && ch <= 0x7E) {
-            final = ch;
-            break;
-        }
-        seq[n++] = ch;
-    }
-    seq[n] = '\0';
-    if (final == 0) return '\x1b';
-
-	if (seq[0] == '<') {
-		/* SGR mouse report: "<Cb;Cx;Cy" followed by a final byte of 'M'
-		 * (button press / wheel notch) or 'm' (button release). Press and
-		 * release always arrive as two independent escape sequences -- two
-		 * separate calls to be_readKey() -- never both in the same call.
-		 * The previous code tried to reconcile mode1 (only ever set by the
-		 * 'M' branch) against mode2 (only ever set by the 'm' branch)
-		 * within a single call, but exactly one of them was always still
-		 * sitting at its -1 sentinel default -- so a press always resolved
-		 * to "unknown" (mode -1) and fell to the default: M_OTHER_CLICK,
-		 * which has no case in the keypress switch and dropped straight
-		 * into be_editorInsertChar(), inserting a garbage byte into the
-		 * document on every single click. */
-		char t;
-		int mode = 0;
-		sscanf(seq, "%c%d;%d;%d", &t, &mode, &state.mouse.ex, &state.mouse.ey);
-		state.mouse.mode = mode;
-
-		/* A plain click doesn't need release semantics -- there's no
-		 * drag/selection to track -- so only button-down/wheel ('M') is
-		 * actionable. Button-up ('m') is consumed here and discarded
-		 * instead of being handed back as if it were a key. */
-		if (final != 'M') return be_readKey();
-
-		switch (mode) {
-			case 0:
-				return M_LEFT_CLICK;
-			case 64:
-				return M_SCROLL_UP;
-			case 65:
-				return M_SCROLL_DOWN;
-			default:
-				return M_OTHER_CLICK;
-		}
-	}
-
-    int p1 = 1, p2 = 1;
-    sscanf(seq, "%d;%d", &p1, &p2);
-    int mods = p2-1;
-
-    switch (final) {
-        case 'H': return (mods & MOD_CTRL) ? CTRL_HOME : HOME;
-        case 'F': return (mods & MOD_CTRL) ? CTRL_END : END;
-		case 'A': return ARROW_UP;
-        case 'B': return ARROW_DOWN;
-		case 'C': return (mods & MOD_CTRL) ? WORD_RIGHT : ARROW_RIGHT;
-		case 'D': return (mods & MOD_CTRL) ? WORD_LEFT : ARROW_LEFT;
-
-        case '~':
-            switch (p1) {
-                case 1: case 7: return (mods & MOD_CTRL) ? CTRL_HOME : HOME;
-                case 4: case 8: return (mods & MOD_CTRL) ? CTRL_END : END;
-				case 3: return (mods & MOD_CTRL) ? WORD_DELETE : DELETE;
-                case 5: return PAGE_UP;
-                case 6: return PAGE_DOWN;
-            }
-            break;
-
-        case '^':
-            switch (p1) {
-                case 7: return CTRL_HOME;
-                case 8: return CTRL_END;
-            }
-            break;
-
-		// Kitty keyboard protocol ("disambiguate escape codes"), which
-		// be_enableRawMode() opts into: "CSI <codepoint> ; <mods> u". Once a
-		// terminal supports it, this isn't just how Ctrl+Shift+S shows up —
-		// Esc/Enter/Tab/Backspace and *every* Ctrl-modified key switch to
-		// this form too, since that's what makes Ctrl+Shift+<letter>
-		// representable at all (on an unmodified terminal it's the exact
-		// same byte as plain Ctrl+<letter>). So this has to reconstruct
-		// every one of those, not just special-case the one combo it was
-		// added for — otherwise every existing Ctrl+ binding breaks on
-		// terminals that do support the protocol. Terminals that don't
-		// support it never send 'u' sequences, so none of this ever runs
-		// for them and nothing changes.
-		case 'u':
-			if (p1 == 27)  return '\x1b';
-			if (p1 == 13)  return '\r';
-			if (p1 == 9)   return '\t';
-			if (p1 == 127) return (mods & (MOD_CTRL | MOD_ALT)) ? CTRL_BACKSPACE : BACKSPACE;
-
-			if ((p1 == 's' || p1 == 'S') && (mods & MOD_CTRL) && (mods & MOD_SHIFT))
-				return CTRL_SHIFT_S;
-
-			// Plain Ctrl+<letter> (no Shift): collapse back to the legacy
-			// control byte CTRL_KEY() produces, so every other Ctrl+
-			// binding in the app keeps working unchanged.
-			if ((mods & MOD_CTRL) && !(mods & MOD_SHIFT) &&
-			    ((p1 >= 'a' && p1 <= 'z') || (p1 >= 'A' && p1 <= 'Z')))
-				return CTRL_KEY(p1);
-			break;
-    }
-    return '\x1b';
 }
 
 int be_getCursorPos(int *rows, int *cols) {
@@ -1128,6 +707,21 @@ static int line_width(const BE_HomepageLine *ln) {
 	return w;
 }
 
+static void be_scrollView(int delta) {
+	int maxoff = (state.numrows > state.screenrows) ? state.numrows - state.screenrows : 0;
+	state.rowoff += delta;
+	if (state.rowoff < 0) state.rowoff = 0;
+	if (state.rowoff > maxoff) state.rowoff = maxoff;
+
+	if (state.cur_y < state.rowoff) state.cur_y = state.rowoff;
+	if (state.cur_y >= state.rowoff + state.screenrows) state.cur_y = state.rowoff + state.screenrows - 1;
+	if (state.cur_y >= state.numrows) state.cur_y = state.numrows ? state.numrows - 1 : 0;
+	if (state.cur_y < 0) state.cur_y = 0;
+
+	int rowlen = (state.cur_y < state.numrows) ? state.row[state.cur_y].size : 0;
+	if (state.cur_x > rowlen) state.cur_x = rowlen;
+}
+
 int be_drawRows(StringBuilder *sb) {
 	int y, res = 1;
 	for (y = 0; y < state.screenrows; y++) {
@@ -1168,19 +762,9 @@ void be_drawStatusBar(StringBuilder *sb) {
 	// Move the cursor to the right position (END)
 	be_moveCursor(sb, 0, state.screenrows);
 
-	// Prepare the foreground and background sequences
-	int br, bg, bb;
-	int fr, fg, fb;
-	char backbuf[32];
-	char forebuf[32];
-	hex2rgb(&br, &bg, &bb, sb_theme.sb_background);
-	hex2rgb(&fr, &fg, &fb, sb_theme.sb_foreground);
-
-	snprintf(backbuf, sizeof(backbuf), "\033[48;2;%d;%d;%dm", br, bg, bb);
-	snprintf(forebuf, sizeof(forebuf), "\033[38;2;%d;%d;%dm", fr, fg, fb);
-
-	sb_append(sb, backbuf); // set the background
-	sb_append(sb, forebuf); // set the foreground
+	// Clear BG&FG for the status bar
+	be_bgOn(sb, colorscheme.status.bg);
+	be_fgOn(sb, colorscheme.status.fg);
     
     int cols = state.screencols;
     if (cols < 0) cols = 0;
@@ -1284,38 +868,43 @@ void be_drawHomepage(StringBuilder *sb) {
 /* An empty row: just the two side borders with the interior blanked. */
 static void be_drawDialogPadRow(StringBuilder *sb, int x, int y, int inner) {
 	be_moveCursor(sb, x, y);
-	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_V FMT_RESET);
 	for (int i = 0; i < inner; i++) sb_append(sb, " ");
-	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_V FMT_RESET);
 }
 
 /* A row with a single left-aligned styled message, padded out to the
  * right border. */
 static void be_drawDialogTextRow(StringBuilder *sb, int x, int y, int inner,
-                                  const char *style, const char *text) {
+                                  Color style, const char *text) {
 	be_moveCursor(sb, x, y);
-	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
-	sb_append(sb, "\x1b[");
-	sb_append(sb, style);
-	sb_append(sb, "m");
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_V FMT_RESET);
+	be_fgOn(sb, style);
 	sb_append(sb, text);
-	sb_append(sb, S_RESET);
+	sb_append(sb, FMT_RESET);
 	for (int i = 0; i < inner - utf8_width(text); i++) sb_append(sb, " ");
-	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_V FMT_RESET);
 }
 
 /* One button in the button bar: highlighted (reverse video) when it has
  * focus, dim otherwise. Returns the number of cells it drew, so the
  * caller can work out how much trailing padding is left. */
-static int be_drawDialogButton(StringBuilder *sb, const char *label, bool focused, const char *focus_clr) {
-	sb_append(sb, "  ");
-	char focus_esc_code[32];
-	snprintf(focus_esc_code, sizeof(focus_esc_code), "\x1b[7;%sm",  focus_clr);
-	sb_append(sb, focused ? focus_esc_code : "\x1b[" S_DIM "m");
+static int be_drawDialogButton(StringBuilder *sb, const char *label, bool focused, Color focus_clr) {
+	sb_append(sb, " ");
+	if (focused) {
+		be_bgOn(sb, focus_clr);
+		be_fgOn(sb, colorscheme.dialog.text);
+	}
+	else be_fgOn(sb, colorscheme.dialog.dim);
 	sb_append(sb, "[");
 	sb_append(sb, label);
 	sb_append(sb, "]");
-	sb_append(sb, S_RESET);
+	sb_append(sb, FMT_RESET);
+	sb_append(sb, " ");
 	return 4 + utf8_width(label);
 }
 
@@ -1331,10 +920,11 @@ void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 
     /* Top Border */
     be_moveCursor(sb, x, y);
-    sb_append(sb, "\x1b[" S_DIM "m" B_TL);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_TL);
     sb_append(sb, B_H " *unsaved changes ");
     for (int i = 0; i < width - 21; i++) sb_append(sb, B_H);
-    sb_append(sb, B_TR S_RESET);
+    sb_append(sb, B_TR FMT_RESET);
 
 	/* First Pad */
     be_drawDialogPadRow(sb, x, y + 1, inner);
@@ -1344,64 +934,67 @@ void be_drawSaveDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 	const char *file_desc = (state.filename == NULL) ? "File" : state.filename;
 	snprintf(buf, sizeof(buf), "  %s has been modified.", file_desc);
 
-    be_drawDialogTextRow(sb, x, y + 2, inner, S_TEXT, buf);
-    be_drawDialogTextRow(sb, x, y + 3, inner, S_TEXT, "  Save before quitting ?");
+    be_drawDialogTextRow(sb, x, y + 2, inner, colorscheme.dialog.text, buf);
+    be_drawDialogTextRow(sb, x, y + 3, inner, colorscheme.dialog.text, "  Save before quitting ?");
 
 	/* Second Pad */
     be_drawDialogPadRow(sb, x, y + 4, inner);
 
 	/* Text Box */
-    be_drawDialogTextRow(sb, x, y + 5, inner, S_DIM, "  save to");
+    be_drawDialogTextRow(sb, x, y + 5, inner, colorscheme.dialog.dim, "  save to");
 
     // Text Box: keep the caret close to the border so typing starts right
     // where you're looking, instead of several cells in.
     be_moveCursor(sb, x, y + 6);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
-    sb_append(sb, "\x1b[" S_ACCENT "m" " [ " S_RESET);
-    sb_append(sb, "\x1b[" S_TEXT "m");
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
+	be_fgOn(sb, colorscheme.dialog.accent);
+    sb_append(sb, " [ " FMT_RESET);
+	be_fgOn(sb, colorscheme.dialog.text);
     sb_append(sb, sd->input_path);
     int box_used = 3 + (int)sd->inputlen; // " [ " + typed text
     for (int i = 0; i < inner - box_used - 3; i++) sb_append(sb, " "); // leave room for " ] "
-    sb_append(sb, S_RESET "\x1b[" S_ACCENT "m" " ] " S_RESET);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	sb_append(sb, FMT_RESET);
+	be_fgOn(sb, colorscheme.dialog.accent);
+    sb_append(sb, " ] " FMT_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
 
 	/* Third Pad */
     be_drawDialogPadRow(sb, x, y + 7, inner);
 
-    // Buttons: exactly one of Save/Quit/Cancel is focused at a time (Tab
-    // or Left/Right cycles focus; Enter runs whichever is focused). Their
-    // hotkeys (s/q/c) still work no matter which button has focus.
+	/* Buttons */
     be_moveCursor(sb, x, y + 8);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
 
     const char *labels[3] = { " (S)ave ", " (Q)uit ", " (C)ancel " };
     int used = 0;
     for (int i = 0; i < 3; i++) {
         bool focused = ((int)sd->focus == SD_FOCUS_SAVE + i);
 		if (sd->focus == SD_FOCUS_QUIT) {
-			used += be_drawDialogButton(sb, labels[i], focused, S_ERROR);
+			used += be_drawDialogButton(sb, labels[i], focused, colorscheme.dialog.err);
 		} else {
-			used += be_drawDialogButton(sb, labels[i], focused, S_ACCENT);
+			used += be_drawDialogButton(sb, labels[i], focused, colorscheme.dialog.ok);
 		}
     }
     for (int i = 0; i < inner - used; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb,  B_V FMT_RESET);
 
 	/* Last Pad */
     be_drawDialogPadRow(sb, x, y + 9, inner);
 
     /* Bottom border */
     be_moveCursor(sb, x, y + 10);
-    sb_append(sb, "\x1b[" S_DIM "m" B_BL B_H);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_BL B_H);
     const char *btm_msg = "tab/←→ switch · enter select · esc cancel";
     sb_append(sb, btm_msg);
     for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
-    sb_append(sb, B_BR S_RESET);
+    sb_append(sb, B_BR FMT_RESET);
 
-	// Land the caret at the actual cursor position, not always at the end
-	// of the typed text: border(1) + " [ "(3) = 4 cells in, then however
-	// far the cursor currently sits (inputlen + cursor, since cursor is a
-	// <=0 offset from the end).
+	/* Set the cursor position */
 	*cur_x = x + 4 + (int)(sd->inputlen + sd->cursor);
 	*cur_y = y + 6;
 }
@@ -1429,10 +1022,11 @@ void be_drawOpenDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 
     /* Top Border */
     be_moveCursor(sb, x, y);
-    sb_append(sb, "\x1b[" S_DIM "m" B_TL);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_TL);
     sb_append(sb, B_H " Open File ");
     for (int i = 0; i < width - 14; i++) sb_append(sb, B_H);
-    sb_append(sb, B_TR S_RESET);
+    sb_append(sb, B_TR FMT_RESET);
 
 	/* First Pad */
     be_drawDialogPadRow(sb, x, y + 1, inner);
@@ -1440,54 +1034,67 @@ void be_drawOpenDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 	/* Open Dailog Message */
 	char buf[80];
 	snprintf(buf, sizeof(buf), "  Open a file:");
-    be_drawDialogTextRow(sb, x, y + 2, inner, S_TEXT, buf);
+    be_drawDialogTextRow(sb, x, y + 2, inner, colorscheme.dialog.text, buf);
 
 	/* Second Pad */
     be_drawDialogPadRow(sb, x, y + 3, inner);
 
 	/* Text Box */
-    be_drawDialogTextRow(sb, x, y + 4, inner, S_DIM, "  open file:");
+    be_drawDialogTextRow(sb, x, y + 4, inner, colorscheme.dialog.dim, "  open file:");
 
     be_moveCursor(sb, x, y + 5);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
-    sb_append(sb, "\x1b[" S_ACCENT "m" " [ " S_RESET);
-    sb_append(sb, "\x1b[" S_TEXT "m");
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
+	be_fgOn(sb, colorscheme.dialog.accent);
+    sb_append(sb, " [ " FMT_RESET);
+	be_fgOn(sb, colorscheme.dialog.text);
     sb_append(sb, od->input_path);
     int box_used = 3 + (int)od->inputlen;
     for (int i = 0; i < inner - box_used - 3; i++) sb_append(sb, " ");
-    sb_append(sb, S_RESET "\x1b[" S_ACCENT "m" " ] " S_RESET);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	sb_append(sb, FMT_RESET);
+	be_fgOn(sb, colorscheme.dialog.accent);
+    sb_append(sb, " ] " FMT_RESET);
+
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
 
 	/* Third Pad */
     be_drawDialogPadRow(sb, x, y + 6, inner);
 
 	/* Directory Contents */
     be_moveCursor(sb, x, y + 7);
-    sb_append(sb, "\x1b[" S_DIM "m" B_LT B_H);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_LT B_H);
 	char dirinfo[64];
 	snprintf(dirinfo, sizeof(dirinfo), " %d items in the directory · %d listed ", n, extra_height);
 	sb_append(sb, dirinfo);
-	for (int i = 0; i < inner - utf8_width(dirinfo) - 1; i++) sb_append(sb, "\x1b[" S_DIM "m" B_H S_RESET);
-	sb_append(sb, "\x1b[" S_DIM "m" B_RT S_RESET);
+	for (int i = 0; i < inner - utf8_width(dirinfo) - 1; i++) {
+		be_fgOn(sb, colorscheme.dialog.dim);
+		sb_append(sb, B_H);
+	}
+	sb_append(sb, B_RT FMT_RESET);
 
 	int di = 0;
 	for (di = 0; di <= extra_height; di++) {
 		be_moveCursor(sb, x, y + 8 + di);
-		sb_append(sb, "\x1b[" S_DIM "m" B_V "  ");
+	be_fgOn(sb, colorscheme.dialog.dim);
+		sb_append(sb, B_V "  ");
 		if (di == extra_height) {
 			sb_append(sb, "🞃 ");
 			for (int i = 0; i < inner - 4; i++) sb_append(sb, " ");
 		} else {
 			if (contents[di]->d_type == 8) {
-				sb_append(sb, S_RESET "\x1b[" S_FILE "m");
+				sb_append(sb, FMT_RESET);
+				be_fgOn(sb, colorscheme.dialog.file);
 				sb_append(sb, contents[di]->d_name);
-				sb_append(sb, S_RESET "\x1b[" S_DIM "m");
+				sb_append(sb, FMT_RESET);
+				be_fgOn(sb, colorscheme.dialog.dim);
 			} else {
 				sb_append(sb, contents[di]->d_name);
 			}
 			for (int i = 0; i < inner - utf8_width(contents[di]->d_name) - 2; i++) sb_append(sb, " ");
 		}
-		sb_append(sb, B_V S_RESET);
+		sb_append(sb, B_V FMT_RESET);
 	}
 
 	/* Fourth Pad */
@@ -1495,29 +1102,31 @@ void be_drawOpenDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 
 	/* Buttons */
     be_moveCursor(sb, x, y + di + 9);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
     const char *labels[2] = { " (O)pen ", " (C)ancel " };
     int used = 0;
     for (int i = 0; i < 2; i++) {
         bool focused = ((int)od->focus == OD_FOCUS_OPEN + i);
-        used += be_drawDialogButton(sb, labels[i], focused, S_ACCENT);
+        used += be_drawDialogButton(sb, labels[i], focused, colorscheme.dialog.ok);
     }
     for (int i = 0; i < inner - used; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
 
 	/* Last Pad */
     be_drawDialogPadRow(sb, x, y + 10 + di, inner);
 
     /* Bottom border */
     be_moveCursor(sb, x, y + 11 + di);
-    sb_append(sb, "\x1b[" S_DIM "m" B_BL B_H);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_BL B_H);
     const char *btm_msg = "tab/←→ switch · enter select · esc cancel";
     sb_append(sb, btm_msg);
     for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
-    sb_append(sb, B_BR S_RESET);
+    sb_append(sb, B_BR FMT_RESET);
 
-	// Land the caret at the actual cursor position -- see be_drawSaveDialog
-	// for why this isn't just inputlen.
+	/* Set the cursor position */
 	*cur_x = x + 4 + (int)(od->inputlen + od->cursor);
 	*cur_y = y + 5;
 
@@ -1539,7 +1148,7 @@ void be_drawGotoDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
     sb_append(sb, "\x1b[" S_DIM "m" B_TL);
     sb_append(sb, B_H " Open File ");
     for (int i = 0; i < width - 14; i++) sb_append(sb, B_H);
-    sb_append(sb, B_TR S_RESET);
+    sb_append(sb, B_TR FMT_RESET);
 
 	/* First Pad */
     be_drawDialogPadRow(sb, x, y + 1, inner);
@@ -1547,50 +1156,61 @@ void be_drawGotoDialog(StringBuilder *sb, int *cur_x, int *cur_y) {
 	/* Open Dailog Message */
 	char buf[80];
 	snprintf(buf, sizeof(buf), "  Goto a line:");
-    be_drawDialogTextRow(sb, x, y + 2, inner, S_TEXT, buf);
+    be_drawDialogTextRow(sb, x, y + 2, inner, colorscheme.dialog.text, buf);
 
 	/* Second Pad */
     be_drawDialogPadRow(sb, x, y + 3, inner);
 
 	/* Text Box */
-    be_drawDialogTextRow(sb, x, y + 4, inner, S_DIM, "  goto: ");
+    be_drawDialogTextRow(sb, x, y + 4, inner, colorscheme.dialog.dim, "  goto: ");
 
     be_moveCursor(sb, x, y + 5);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
-    sb_append(sb, "\x1b[" S_ACCENT "m" " [ " S_RESET);
-    sb_append(sb, "\x1b[" S_TEXT "m");
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
+
+	be_fgOn(sb, colorscheme.dialog.accent);
+    sb_append(sb, " [ " FMT_RESET);
+
+	be_fgOn(sb, colorscheme.dialog.text);
     sb_append(sb, gd->input);
     int box_used = 3 + (int)gd->inputlen;
     for (int i = 0; i < inner - box_used - 3; i++) sb_append(sb, " ");
-    sb_append(sb, S_RESET "\x1b[" S_ACCENT "m" " ] " S_RESET);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	sb_append(sb, FMT_RESET);
+	be_fgOn(sb, colorscheme.dialog.accent);
+    sb_append(sb, " ] " FMT_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
 
 	/* Third Pad */
     be_drawDialogPadRow(sb, x, y + 6, inner);
 
     be_moveCursor(sb, x, y + 7);
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
 
     const char *labels[2] = { " (G)oto ", " (C)ancel " };
     int used = 0;
     for (int i = 0; i < 2; i++) {
         bool focused = ((int)gd->focus == GD_FOCUS_GOTO + i);
-        used += be_drawDialogButton(sb, labels[i], focused, S_ACCENT);
+        used += be_drawDialogButton(sb, labels[i], focused, colorscheme.dialog.ok);
     }
     for (int i = 0; i < inner - used; i++) sb_append(sb, " ");
-    sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_V FMT_RESET);
 
 	/* Last Pad */
     be_drawDialogPadRow(sb, x, y + 8, inner);
 
     /* Bottom border */
     be_moveCursor(sb, x, y + 9);
-    sb_append(sb, "\x1b[" S_DIM "m" B_BL B_H);
+	be_fgOn(sb, colorscheme.dialog.dim);
+    sb_append(sb, B_BL B_H);
     const char *btm_msg = "tab/←→ switch · enter select · esc cancel";
     sb_append(sb, btm_msg);
     for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
-    sb_append(sb, B_BR S_RESET);
+    sb_append(sb, B_BR FMT_RESET);
 
+	/* Set the cursor position */
 	*cur_x = x + 4 + (int)gd->inputlen;
 	*cur_y = y + 5;
 }
@@ -1613,25 +1233,24 @@ void be_drawFindBar(StringBuilder *sb, int *cur_x, int *cur_y) {
 	sb_append(sb, "\x1b[" S_DIM "m" B_TL);
 	sb_append(sb, B_H " find ");
 	for (int i = 0; i < width - 9; i++) sb_append(sb, B_H);
-	sb_append(sb, B_TR S_RESET);
+	sb_append(sb, B_TR FMT_RESET);
 
 	/* Input row */
 	int field_w = inner - 3;
 	if (field_w < 1) field_w = 1;
-	// Actual cursor position, not always the end -- now that ARROW_LEFT/
-	// RIGHT and friends can move f->cursor around within the query, the
-	// caret needs to follow it instead of staying pinned to the end.
+
 	int caret_col = f->inputlen + f->cursor;
 
 	be_moveCursor(sb, x, y + 1);
-	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
-	sb_append(sb, "\x1b[" S_ACCENT "m" " \xe2\x80\xba " S_RESET);
+	sb_append(sb, "\x1b[" S_DIM "m" B_V FMT_RESET);
+	sb_append(sb, "\x1b[" S_ACCENT "m" " \xe2\x80\xba " FMT_RESET);
 	sb_append(sb, "\x1b[" S_TEXT "m");
 	sb_append(sb, f->input);
-	sb_append(sb, S_RESET);
+	sb_append(sb, FMT_RESET);
 	for (int i = 0; i < inner - f->inputlen - 3; i++) sb_append(sb, " ");
-	sb_append(sb, "\x1b[" S_DIM "m" B_V S_RESET);
+	sb_append(sb, "\x1b[" S_DIM "m" B_V FMT_RESET);
 
+	/* Set cursor position */
 	*cur_x = x + 4 + caret_col;
 	*cur_y = y + 1;
 
@@ -1644,26 +1263,20 @@ void be_drawFindBar(StringBuilder *sb, int *cur_x, int *cur_y) {
 	} else {
 		snprintf(status, sizeof(status), "  match %d of %d", f->cur + 1, f->nmatches);
 	}
-	be_drawDialogTextRow(sb, x, y + 2, inner, S_DIM, status);
+	be_drawDialogTextRow(sb, x, y + 2, inner, colorscheme.dialog.dim, status);
 
 	/* Bottom border, key hints baked in like the other dialogs' footers. */
 	be_moveCursor(sb, x, y + 3);
-	sb_append(sb, "\x1b[" S_DIM "m" B_BL B_H);
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_BL B_H);
 	const char *btm_msg = "\xe2\x86\x91\xe2\x86\x93 seek \xc2\xb7 \xe2\x8f\x8e keep \xc2\xb7 esc cancel";
 	sb_append(sb, btm_msg);
 	for (int i = 0; i < inner - utf8_width(btm_msg) - 1; i++) sb_append(sb, B_H);
-	sb_append(sb, B_BR S_RESET);
+	sb_append(sb, B_BR FMT_RESET);
 
 }
 
 /* Find: match-highlight rendering helpers */
-/* Is render-column `rx` on `filerow` inside a find match? Returns the
- * match index, or -1. Byte columns are converted through be_calculateRx()
- * so highlighting still lines up on rows containing tabs.
- *
- * Linear scan over every match -- fine at editor scale (the match list is
- * already bounded by how many hits a rescan found), and simpler than
- * indexing matches per-row for what is, so far, a single-file feature. */
 static int be_findMatchAt(int filerow, int rx) {
 	BE_Find *f = &state.find;
 	for (int i = 0; i < f->nmatches; i++) {
@@ -1676,9 +1289,6 @@ static int be_findMatchAt(int filerow, int rx) {
 	return -1;
 }
 
-/* Emits one row's visible text broken into color-tagged spans wherever a
- * find match falls. Only called for rows that actually have a match --
- * see be_drawRows(). */
 void be_drawRowWithMatches(StringBuilder *sb, int filerow, int coloff, int len) {
 	const char *render = state.row[filerow].render;
 	bool in_match = false;
@@ -1726,34 +1336,44 @@ void be_drawPalette(StringBuilder *sb, int *cur_x, int *cur_y) {
 
 	/* Top Border */
 	be_moveCursor(sb, x, y);
-	sb_append(sb, PAL_DIM B_TL);
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_TL);
 	sb_repeat(sb, B_H, inner);
-	sb_append(sb, B_TR PAL_RESET);
+	sb_append(sb, B_TR FMT_RESET);
 
 	/* Input Field */
 	int qshow = p->qlen;
 	if (qshow > inner - 3) qshow = inner - 3;
 
 	be_moveCursor(sb, x, y+1);
-	sb_append(sb, PAL_DIM B_V PAL_RESET);
-	sb_append(sb, " " PAL_ACCENT "\xe2\x80\xba " PAL_RESET);
-	sb_append(sb, PAL_BOLD);
+
+	// border
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_V FMT_RESET);
+	sb_append(sb, " ");
+	// caret
+	be_fgOn(sb, colorscheme.dialog.accent);
+	sb_append(sb, "\xe2\x80\xba " FMT_RESET);
+	sb_append(sb, FMT_BOLD);
 	for (int i = 0; i < qshow; i++) {
 		char ch[2] = { p->query[i], '\0' };
 		sb_append(sb, ch);
 	}
-	
-	sb_append(sb, PAL_RESET);
+	sb_append(sb, FMT_RESET);
+
+	// Final pad in input field + last border
 	sb_repeat(sb, " ", inner - 3 - qshow);
-	sb_append(sb, PAL_DIM B_V PAL_RESET);
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_V FMT_RESET);
 
 	/* Separator */
 	be_moveCursor(sb, x, y+2);
-	sb_append(sb, PAL_DIM B_LT);
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_LT);
 	sb_repeat(sb, B_H, inner);
-	sb_append(sb, B_RT PAL_RESET);
+	sb_append(sb, B_RT FMT_RESET);
 
-	// TODO: Add logic here so that we can use p->cursor
+	/* Set the cursor position */
 	*cur_x = x + 4 + qshow;
 	*cur_y = y + 1;
 
@@ -1761,13 +1381,15 @@ void be_drawPalette(StringBuilder *sb, int *cur_x, int *cur_y) {
 	for (int r = 0; r < listrows; r++) {
 		int row_y = y + 3 + r;
 		be_moveCursor(sb, x, row_y);
-		sb_append(sb, PAL_DIM B_V PAL_RESET);
+		be_fgOn(sb, colorscheme.dialog.dim);
+		sb_append(sb, B_V FMT_RESET);
 
 		if (p->nfiltered == 0) {
-			const char *msg = PAL_DIM "No matching commands found" PAL_RESET;
+			be_fgOn(sb, colorscheme.dialog.dim);
+			const char *msg = "No matching commands found";
 			sb_append(sb, msg);
 			sb_repeat(sb, " ", inner - 26);
-			sb_append(sb, PAL_DIM B_V PAL_RESET);
+			sb_append(sb, B_V FMT_RESET);
 			continue;
 		}
 
@@ -1787,33 +1409,35 @@ void be_drawPalette(StringBuilder *sb, int *cur_x, int *cur_y) {
 			gap = inner - 2 - namew; 
 		}
 
-		if (selected) sb_append(sb, PAL_SEL);
+		if (selected) be_bgOn(sb, colorscheme.dialog.sel); 
 
 		sb_append(sb, " ");
-		sb_append(sb, selected ? PAL_ACCENT : PAL_TEXT);
-		if (selected) sb_append(sb, PAL_SEL);
+		(selected) ? be_fgOn(sb, colorscheme.dialog.accent) : be_fgOn(sb, colorscheme.dialog.text);
+		// sb_append(sb, selected ? PAL_ACCENT : PAL_TEXT);
+		if (selected) be_bgOn(sb, colorscheme.dialog.sel);
 		for (int i = 0; i < namew; i++) {
 			char ch[2] = {name[i], '\0' };
 			sb_append(sb, ch);
 		}
-		sb_append(sb, PAL_RESET);
-		if (selected) sb_append(sb, PAL_SEL);
+		sb_append(sb, FMT_RESET);
+		if (selected) be_bgOn(sb, colorscheme.dialog.sel);
 		sb_repeat(sb, " ", gap);
-		sb_append(sb, PAL_DIM);
-		if (selected) sb_append(sb, PAL_SEL);
+		be_fgOn(sb, colorscheme.dialog.dim);
+		if (selected) be_bgOn(sb, colorscheme.dialog.sel);
 
 		sb_append(sb, hint);
 		sb_append(sb, " ");
-		sb_append(sb, PAL_RESET);
+		sb_append(sb, FMT_RESET);
 
 		sb_append(sb, B_V);
 	}
 
 	/* Bottom Border */
 	be_moveCursor(sb, x, y + listrows + 3);
-	sb_append(sb, PAL_DIM B_BL);
+	be_fgOn(sb, colorscheme.dialog.dim);
+	sb_append(sb, B_BL);
 	sb_repeat(sb, B_H, inner);
-	sb_append(sb, B_BR PAL_RESET);
+	sb_append(sb, B_BR FMT_RESET);
 }
 
 /* line editing */
@@ -1909,20 +1533,133 @@ static int be_rowVisualWidth(BE_Row *row) {
 }
 
 /* Input Processing */
-static void be_scrollView(int delta) {
-	int maxoff = (state.numrows > state.screenrows) ? state.numrows - state.screenrows : 0;
-	state.rowoff += delta;
-	if (state.rowoff < 0) state.rowoff = 0;
-	if (state.rowoff > maxoff) state.rowoff = maxoff;
+int be_readKey() {
+	int nread;
+	char c;
+	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+		if (nread == -1 && errno != EAGAIN) be_die("read");
+	}
 
-	if (state.cur_y < state.rowoff) state.cur_y = state.rowoff;
-	if (state.cur_y >= state.rowoff + state.screenrows) state.cur_y = state.rowoff + state.screenrows - 1;
-	if (state.cur_y >= state.numrows) state.cur_y = state.numrows ? state.numrows - 1 : 0;
-	if (state.cur_y < 0) state.cur_y = 0;
+	if (c != '\x1b') {
+	    return (unsigned char)c;
+	}
 
-	int rowlen = (state.cur_y < state.numrows) ? state.row[state.cur_y].size : 0;
-	if (state.cur_x > rowlen) state.cur_x = rowlen;
+	char ch;
+	if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
+
+	/* SS3 form: ESC O <final>. Never carries modifiers. */
+    if (ch == 'O') {
+            if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
+            switch (ch) {
+				case 'H': return HOME;
+				case 'F': return END;
+				case 'A': return ARROW_UP;
+				case 'B': return ARROW_DOWN;
+				case 'C': return ARROW_RIGHT;
+				case 'D': return ARROW_LEFT;
+            }
+            return '\x1b';
+    }
+
+	/* Check for ALT+Keypress */
+    if (ch != '[') {
+        switch (ch) {
+            case 'b': return WORD_LEFT;
+            case 'f': return WORD_RIGHT;
+            case 0x7f:
+            case 0x08: return CTRL_BACKSPACE;
+            case 'a':  return ALT_A;
+            case 'e':  return ALT_E;
+        }
+        return '\x1b';
+    }
+
+    /* CSI form: collect params until a final byte (0x40-0x7E). */
+    char seq[24];
+    size_t n = 0;
+    char final = 0;
+
+    while (n < sizeof(seq) - 1) {
+        if (read(STDIN_FILENO, &ch, 1) != 1) return '\x1b';
+        if (ch >= 0x40 && ch <= 0x7E) {
+            final = ch;
+            break;
+        }
+        seq[n++] = ch;
+    }
+    seq[n] = '\0';
+    if (final == 0) return '\x1b';
+
+	/* Parse the mouse events */
+	if (seq[0] == '<') {
+		char t;
+		int mode = 0;
+		sscanf(seq, "%c%d;%d;%d", &t, &mode, &state.mouse.ex, &state.mouse.ey);
+		state.mouse.mode = mode;
+
+		if (final != 'M') return be_readKey();
+
+		switch (mode) {
+			case 0:
+				return M_LEFT_CLICK;
+			case 64:
+				return M_SCROLL_UP;
+			case 65:
+				return M_SCROLL_DOWN;
+			default:
+				return M_OTHER_CLICK;
+		}
+	}
+
+	/* Parse the CTRL+Keypresses OR Special Keypresses */
+    int p1 = 1, p2 = 1;
+    sscanf(seq, "%d;%d", &p1, &p2);
+    int mods = p2-1;
+
+    switch (final) {
+        case 'H': return (mods & MOD_CTRL) ? CTRL_HOME : HOME;
+        case 'F': return (mods & MOD_CTRL) ? CTRL_END : END;
+		case 'A': return ARROW_UP;
+        case 'B': return ARROW_DOWN;
+		case 'C': return (mods & MOD_CTRL) ? WORD_RIGHT : ARROW_RIGHT;
+		case 'D': return (mods & MOD_CTRL) ? WORD_LEFT : ARROW_LEFT;
+
+        case '~':
+            switch (p1) {
+                case 1: case 7: return (mods & MOD_CTRL) ? CTRL_HOME : HOME;
+                case 4: case 8: return (mods & MOD_CTRL) ? CTRL_END : END;
+				case 3: return (mods & MOD_CTRL) ? WORD_DELETE : DELETE;
+                case 5: return PAGE_UP;
+                case 6: return PAGE_DOWN;
+            }
+            break;
+
+        case '^':
+            switch (p1) {
+                case 7: return CTRL_HOME;
+                case 8: return CTRL_END;
+            }
+            break;
+
+		/* For Kitty */
+		case 'u':
+			if (p1 == 27)  return '\x1b';
+			if (p1 == 13)  return '\r';
+			if (p1 == 9)   return '\t';
+			if (p1 == 127) return (mods & (MOD_CTRL | MOD_ALT)) ? CTRL_BACKSPACE : BACKSPACE;
+
+			if ((p1 == 's' || p1 == 'S') && (mods & MOD_CTRL) && (mods & MOD_SHIFT))
+				return CTRL_SHIFT_S;
+
+			if ((mods & MOD_CTRL) && !(mods & MOD_SHIFT) &&
+			    ((p1 >= 'a' && p1 <= 'z') || (p1 >= 'A' && p1 <= 'Z')))
+				return CTRL_KEY(p1);
+			break;
+    }
+    return '\x1b';
 }
+
+
 
 void be_handleMouseScroll(int key) {
 	switch (key) {
@@ -2090,10 +1827,6 @@ void processSaveDialogKeypress(int c) {
 			if (sd->focus == SD_FOCUS_INPUT) {
 				int start = sd->inputlen + sd->cursor;
 				int end = sd->inputlen + sd->cursor - 1;
-				// Cursor already at the very start -> nothing before it to
-				// scan/delete. The while loops below only ever guard
-				// against going *below* 0, not against already starting
-				// there, and a negative `end` gets used as a memmove index.
 				if (end < 0) end = 0;
 				while (end > 0 && !is_word_char(sd->input_path[end])) end--;
 				while (end > 0 && is_word_char(sd->input_path[end])) end--;
@@ -2399,9 +2132,6 @@ void processFindKeypress(int c) {
 		{
 			int start = f->inputlen + f->cursor;
 			int end = f->inputlen + f->cursor - 1;
-			// Cursor already at the very start -> nothing before it to
-			// scan/delete; without this, a negative `end` reaches the
-			// memmove below as an out-of-bounds index.
 			if (end < 0) end = 0;
 			while (end > 0 && !is_word_char(f->input[end])) end--;
 			while (end > 0 && is_word_char(f->input[end])) end--;
@@ -3063,7 +2793,7 @@ void be_refreshScreen() {
 		
 		if (state.save_dialog.focus == SD_FOCUS_INPUT) {
 			char buf[32];
-			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.loc_x + 1, state.loc_y + 1);
+			snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.loc_y + 1, state.loc_x + 1);
 			sb_append(&sb, buf);
 			sb_append(&sb, "\x1b[?25h");
 		}
@@ -3222,6 +2952,7 @@ void be_processFileArg(const char *filepath) {
 int main(int argc, char **argv) {
     be_enableRawMode();
 	be_initEditor();
+	be_initColorscheme();
 
 	// Enable Mouse Support
 	if (ENABLE_MOUSE_SUPPORT) {
@@ -3230,7 +2961,7 @@ int main(int argc, char **argv) {
 		} 
 	}
 
-	// Open the file
+	// Open the file and handle arguments
 	if (argc >= 2) {
 		if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
 			be_disableRawMode();
